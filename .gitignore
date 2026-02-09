@@ -1,0 +1,13 @@
+anchorMCLuncher/frontend/node_modules
+anchorMCLuncher/backend/node_modules
+anchorMCLuncher/backend/minecraft_servers
+anchorMCLuncher/backend/.env
+anchorMCLuncher/backend/dist
+node_modules
+.env
+anchorMCLuncher/backend/keys/private.pem
+anchorMCLuncher/backend/keys/public.pem
+anchorMCLuncher/backend/CAFPAPI.md
+anchorMCLuncher/backend/适配.md
+anchorMCLuncher/backend/protocol.md
+anchorMCLuncher/backend/update_schema.sql

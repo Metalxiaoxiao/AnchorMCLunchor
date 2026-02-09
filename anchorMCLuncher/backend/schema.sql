@@ -1,0 +1,31 @@
+CREATE DATABASE IF NOT EXISTS mc_launcher;
+
+USE mc_launcher;
+
+CREATE TABLE IF NOT EXISTS users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(255) NOT NULL UNIQUE,
+    password VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS servers (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    ip_address VARCHAR(255) NOT NULL,
+    port INT DEFAULT 25565,
+    description TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS docker_servers (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    container_id VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    port INT NOT NULL,
+    volume_path VARCHAR(255) NOT NULL,
+    status VARCHAR(50) DEFAULT 'stopped',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);

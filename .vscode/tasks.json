@@ -1,0 +1,28 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "install-dependencies",
+      "type": "shell",
+      "command": "npm install",
+      "options": {
+        "cwd": "${workspaceFolder}/anchorMCLuncher/temp_project"
+      },
+      "group": "build"
+    },
+    {
+      "label": "tauri-dev",
+      "type": "shell",
+      "command": "npm run tauri dev",
+      "options": {
+        "cwd": "${workspaceFolder}/anchorMCLuncher/temp_project"
+      },
+      "isBackground": true,
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    }
+  ]
+}
