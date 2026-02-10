@@ -10,6 +10,7 @@ router.post('/create', authenticateToken, dockerController.createServer);
 router.get('/list', authenticateToken, dockerController.listServers);
 router.post('/:id/start', authenticateToken, dockerController.startServer);
 router.post('/:id/stop', authenticateToken, dockerController.stopServer);
+router.delete('/:id', authenticateToken, dockerController.deleteServer);
 router.post('/:id/command', authenticateToken, dockerController.sendCommand);
 router.post('/:id/upload', authenticateToken, upload.single('file'), dockerController.uploadFile);
 router.get('/:id/files', authenticateToken, dockerController.listFiles);

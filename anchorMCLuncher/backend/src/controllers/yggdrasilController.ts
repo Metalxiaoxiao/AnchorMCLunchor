@@ -17,6 +17,14 @@ const signData = (data: string) => {
   return sign.sign(keys.privateKey, 'base64');
 };
 
+const normalizeTextureUrl = (url?: string | null) => {
+  if (!url) return undefined;
+  const trimmed = url.trim();
+  if (!trimmed) return undefined;
+  if (!/^https?:\/\//i.test(trimmed)) return undefined;
+  return trimmed;
+};
+
 const authenticate = async (req: Request, res: Response) => {
   const { username, password, clientToken, requestUser } = req.body;
 
@@ -254,26 +262,31 @@ const hasJoined = async (req: Request, res: Response) => {
 
     if (joinedServerId && joinedServerId === serverId) {
       // Return profile with textures
-      const textureValue = Buffer.from(JSON.stringify({
-        timestamp: Date.now(),
-        profileId: profileId,
-        profileName: user.username,
-        textures: {
-          SKIN: { url: user.skin_url || '' },
-          CAPE: user.cape_url ? { url: user.cape_url } : undefined
-        }
-      })).toString('base64');
+      const skinUrl = normalizeTextureUrl(user.skin_url);
+      const capeUrl = normalizeTextureUrl(user.cape_url);
+      const textures: any = {};
+      if (skinUrl) textures.SKIN = { url: skinUrl };
+      if (capeUrl) textures.CAPE = { url: capeUrl };
+
+      const properties = [] as Array<{ name: string; value: string; signature: string }>;
+      if (Object.keys(textures).length > 0) {
+        const textureValue = Buffer.from(JSON.stringify({
+          timestamp: Date.now(),
+          profileId: profileId,
+          profileName: user.username,
+          textures
+        })).toString('base64');
+        properties.push({
+          name: 'textures',
+          value: textureValue,
+          signature: signData(textureValue)
+        });
+      }
 
       const response: any = {
         id: profileId,
         name: user.username,
-        properties: [
-          {
-            name: 'textures',
-            value: textureValue,
-            signature: signData(textureValue)
-          }
-        ]
+        properties
       };
       return res.json(response);
     }
@@ -308,26 +321,31 @@ const profile = async (req: Request, res: Response) => {
         
         const user = users[0];
         
-        const textureValue = Buffer.from(JSON.stringify({
-          timestamp: Date.now(),
-          profileId: formatUUID(user.uuid),
-          profileName: user.username,
-          textures: {
-            SKIN: { url: user.skin_url || '' },
-            CAPE: user.cape_url ? { url: user.cape_url } : undefined
-          }
-        })).toString('base64');
+        const skinUrl = normalizeTextureUrl(user.skin_url);
+        const capeUrl = normalizeTextureUrl(user.cape_url);
+        const textures: any = {};
+        if (skinUrl) textures.SKIN = { url: skinUrl };
+        if (capeUrl) textures.CAPE = { url: capeUrl };
+
+        const properties = [] as Array<{ name: string; value: string; signature: string }>;
+        if (Object.keys(textures).length > 0) {
+          const textureValue = Buffer.from(JSON.stringify({
+            timestamp: Date.now(),
+            profileId: formatUUID(user.uuid),
+            profileName: user.username,
+            textures
+          })).toString('base64');
+          properties.push({
+            name: 'textures',
+            value: textureValue,
+            signature: signData(textureValue)
+          });
+        }
 
         const response = {
             id: formatUUID(user.uuid),
             name: user.username,
-            properties: [
-                 {
-                    name: 'textures',
-                    value: textureValue,
-                    signature: signData(textureValue)
-                  }
-            ]
+            properties
         };
         
         res.json(response);

@@ -1,11 +1,21 @@
 import axios from 'axios';
 import { AuthResponse, BackendServer } from './types';
 
-const API_URL = 'http://localhost:3000/api';
+const resolveApiBaseUrl = (authServer?: string) => {
+  const raw = (authServer || localStorage.getItem('authServer') || 'http://localhost:3000').trim();
+  const normalized = raw.replace(/\/+$/, '');
+  return normalized.endsWith('/api') ? normalized : `${normalized}/api`;
+};
 
 const api = axios.create({
-  baseURL: API_URL,
+  baseURL: resolveApiBaseUrl(),
 });
+
+export const setApiBaseUrl = (authServer: string) => {
+  api.defaults.baseURL = resolveApiBaseUrl(authServer);
+};
+
+export const getApiBaseUrl = () => api.defaults.baseURL || resolveApiBaseUrl();
 
 // Add a request interceptor to include the token in headers
 api.interceptors.request.use(
@@ -153,7 +163,7 @@ export const checkClientConfigStatus = async (id: string): Promise<boolean> => {
 };
 
 export const getClientFileUrl = (id: string, path: string) => {
-  return `${API_URL}/docker/${id}/client-files/${path}`;
+  return `${getApiBaseUrl()}/docker/${id}/client-files/${path}`;
 };
 
 // File content operations for text editor

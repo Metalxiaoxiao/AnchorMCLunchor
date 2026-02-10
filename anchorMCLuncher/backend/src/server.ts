@@ -8,6 +8,7 @@ import serverRoutes from './routes/serverRoutes';
 import yggdrasilRoutes from './routes/yggdrasilRoutes';
 import dockerRoutes from './routes/dockerRoutes';
 import { initializeCAF } from './services/cafService';
+import { cleanupMissingDockerServers } from './services/dockerService';
 import { initDatabase } from './services/dbMigrationService';
 import { keys } from './config/keys';
 import Docker from 'dockerode';
@@ -86,6 +87,13 @@ const startServer = async () => {
   try {
     await initDatabase();
     await initializeCAF();
+    await cleanupMissingDockerServers();
+
+    setInterval(() => {
+      cleanupMissingDockerServers().catch(err => {
+        console.warn('Docker cleanup failed:', err?.message || err);
+      });
+    }, 5 * 60 * 1000);
     
     server.listen(PORT, () => {
       console.log(`Server is running on port ${PORT}`);

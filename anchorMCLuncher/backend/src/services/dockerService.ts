@@ -101,31 +101,141 @@ export const createServer = async (userId: number, name: string, version: string
     // 5. Add to public server list (optional, but requested)
     // Assuming host IP is localhost or auto-detected. For now use 'localhost' or '127.0.0.1'
     await db.execute(
-        'INSERT INTO servers (name, ip_address, port, description) VALUES (?, ?, ?, ?)',
-        [name, '127.0.0.1', port, `Docker Server: ${name}`]
+        'INSERT INTO servers (name, ip_address, port, description, container_id) VALUES (?, ?, ?, ?, ?)',
+        [name, '127.0.0.1', port, `Docker Server: ${name}`, containerId]
     );
 
     return { containerId, port, serverDir };
 };
 
+const normalizeContainerStatus = (state?: string) => {
+    if (!state) return 'unknown';
+    if (state === 'running' || state === 'restarting' || state === 'paused') return 'running';
+    if (state === 'created') return 'created';
+    return 'stopped';
+};
+
+export const getContainerStatus = async (containerId: string) => {
+    const container = docker.getContainer(containerId);
+    try {
+        const info = await container.inspect();
+        return normalizeContainerStatus(info?.State?.Status);
+    } catch (error: any) {
+        const msg = error?.statusCode || error?.response?.statusCode;
+        if (msg === 404) return 'missing';
+        return 'unknown';
+    }
+};
+
 export const listServers = async (userId: number) => {
     const [rows] = await db.execute<RowDataPacket[]>(
-        'SELECT id, user_id, container_id, name, port, status, created_at, client_config_type, client_config_value, version FROM docker_servers WHERE user_id = ?', 
+        'SELECT id, user_id, container_id, name, port, status, created_at, client_config_type, client_config_value, version FROM docker_servers WHERE user_id = ?',
         [userId]
     );
+
+    for (const row of rows) {
+        const nextStatus = await getContainerStatus(row.container_id);
+        if (nextStatus !== row.status) {
+            await db.execute('UPDATE docker_servers SET status = ? WHERE container_id = ?', [nextStatus, row.container_id]);
+            row.status = nextStatus;
+        }
+    }
+
     return rows;
+};
+
+export const cleanupMissingDockerServers = async () => {
+    const [rows] = await db.execute<RowDataPacket[]>(
+        'SELECT container_id FROM docker_servers'
+    );
+
+    for (const row of rows) {
+        const status = await getContainerStatus(row.container_id);
+        if (status === 'missing') {
+            await deleteDockerServer(row.container_id);
+        }
+    }
+};
+
+export const deleteDockerServer = async (containerId: string) => {
+    const [rows] = await db.execute<RowDataPacket[]>(
+        'SELECT volume_path FROM docker_servers WHERE container_id = ?',
+        [containerId]
+    );
+
+    const container = docker.getContainer(containerId);
+
+    try {
+        const info = await container.inspect();
+        if (info?.State?.Running) {
+            await container.stop();
+        }
+    } catch (error: any) {
+        const code = error?.statusCode || error?.response?.statusCode;
+        if (code !== 404) {
+            console.warn('Failed to inspect/stop container:', error?.message || error);
+        }
+    }
+
+    try {
+        await container.remove({ force: true });
+    } catch (error: any) {
+        const code = error?.statusCode || error?.response?.statusCode;
+        if (code !== 404) {
+            console.warn('Failed to remove container:', error?.message || error);
+        }
+    }
+
+    await db.execute('DELETE FROM docker_servers WHERE container_id = ?', [containerId]);
+    await db.execute('DELETE FROM servers WHERE container_id = ?', [containerId]);
+
+    if (rows.length) {
+        const volumePath = rows[0].volume_path as string;
+        const serverRoot = path.dirname(volumePath);
+        if (fs.existsSync(serverRoot)) {
+            fs.rmSync(serverRoot, { recursive: true, force: true });
+        }
+    }
 };
 
 export const startServer = async (containerId: string) => {
     const container = docker.getContainer(containerId);
-    await container.start();
-    await db.execute('UPDATE docker_servers SET status = ? WHERE container_id = ?', ['running', containerId]);
+    try {
+        await container.start();
+    } catch (error: any) {
+        const code = error?.statusCode || error?.response?.statusCode;
+        if (code === 304) {
+            // Already started
+        } else if (code === 404) {
+            await db.execute('UPDATE docker_servers SET status = ? WHERE container_id = ?', ['missing', containerId]);
+            throw new Error('Container not found');
+        } else {
+            throw error;
+        }
+    }
+
+    const nextStatus = await getContainerStatus(containerId);
+    await db.execute('UPDATE docker_servers SET status = ? WHERE container_id = ?', [nextStatus, containerId]);
 };
 
 export const stopServer = async (containerId: string) => {
     const container = docker.getContainer(containerId);
-    await container.stop();
-    await db.execute('UPDATE docker_servers SET status = ? WHERE container_id = ?', ['stopped', containerId]);
+    try {
+        await container.stop();
+    } catch (error: any) {
+        const code = error?.statusCode || error?.response?.statusCode;
+        if (code === 304) {
+            // Already stopped
+        } else if (code === 404) {
+            await db.execute('UPDATE docker_servers SET status = ? WHERE container_id = ?', ['missing', containerId]);
+            throw new Error('Container not found');
+        } else {
+            throw error;
+        }
+    }
+
+    const nextStatus = await getContainerStatus(containerId);
+    await db.execute('UPDATE docker_servers SET status = ? WHERE container_id = ?', [nextStatus, containerId]);
 };
 
 export const getServerInfo = async (containerId: string) => {

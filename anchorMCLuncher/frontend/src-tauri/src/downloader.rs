@@ -1,13 +1,16 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Semaphore;
 use tauri::{AppHandle, Emitter, Manager, State};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 use futures::stream::StreamExt;
+use tokio::time::sleep;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct FabricLoaderVersion {
@@ -25,13 +28,33 @@ struct ForgeVersion {
 
 pub struct DownloadState {
     pub active_downloads: Mutex<HashSet<String>>,
+    pub cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 impl DownloadState {
     pub fn new() -> Self {
         Self {
             active_downloads: Mutex::new(HashSet::new()),
+            cancel_flags: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn get_cancel_flag(&self, key: &str) -> Arc<AtomicBool> {
+        let mut flags = self.cancel_flags.lock().unwrap();
+        flags
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    }
+
+    pub fn cancel(&self, key: &str) {
+        let flag = self.get_cancel_flag(key);
+        flag.store(true, Ordering::Relaxed);
+    }
+
+    pub fn clear_cancel(&self, key: &str) {
+        let mut flags = self.cancel_flags.lock().unwrap();
+        flags.remove(key);
     }
 }
 
@@ -171,6 +194,9 @@ pub struct DownloadProgress {
     pub downloaded_files: usize,
     pub current_file: String,
     pub percent: f64,
+    pub current_file_progress: Option<f64>,
+    pub current_file_downloaded: Option<u64>,
+    pub current_file_total: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -178,6 +204,24 @@ pub struct DownloadLog {
     pub task_id: Option<String>,
     pub message: String,
     pub level: String,
+}
+
+fn get_cancel_key(version_id: &str, task_id: &Option<String>) -> String {
+    task_id.clone().unwrap_or_else(|| version_id.to_string())
+}
+
+#[tauri::command]
+pub fn cancel_download(state: State<'_, DownloadState>, task_id: String) -> Result<(), String> {
+    state.cancel(&task_id);
+    Ok(())
+}
+
+#[derive(Clone, Serialize)]
+pub struct DownloadFileProgress {
+    pub task_id: Option<String>,
+    pub filename: String,
+    pub progress: f64,
+    pub status: String,
 }
 
 const MANIFEST_URL: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
@@ -311,7 +355,7 @@ pub async fn install_version(
     Ok(())
 }
 
-async fn install_forge_or_neoforge(
+pub async fn install_forge_or_neoforge(
     app: &AppHandle,
     client: &reqwest::Client,
     game_version: &str,
@@ -328,21 +372,20 @@ async fn install_forge_or_neoforge(
         downloaded_files: 0,
         current_file: format!("Preparing {} installer...", loader_type),
         percent: 0.0,
+        current_file_progress: None,
+        current_file_downloaded: None,
+        current_file_total: None,
     });
 
     let installer_url = if loader_type == "forge" {
         format!("https://bmclapi2.bangbang93.com/forge/download?mcversion={}&version={}&category=installer&format=jar", game_version, loader_version)
     } else {
         // NeoForge
-        let url = format!("https://bmclapi2.bangbang93.com/neoforge/list/{}", game_version);
-        let resp: Vec<NeoForgeVersion> = client.get(&url).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
-        let entry = resp.into_iter().find(|v| v.version == loader_version).ok_or("NeoForge version not found")?;
-        
-        if let Some(path) = entry.installer_path {
-            format!("https://bmclapi2.bangbang93.com/neoforge{}", path)
-        } else {
-            return Err("NeoForge installer path not found".to_string());
-        }
+        // Use BMCLAPI's official download endpoint to avoid relying on non-existent installerPath fields.
+        format!(
+            "https://bmclapi2.bangbang93.com/neoforge/version/{}/download/installer.jar",
+            loader_version
+        )
     };
 
     let temp_dir = std::env::temp_dir();
@@ -355,6 +398,9 @@ async fn install_forge_or_neoforge(
         downloaded_files: 0,
         current_file: "Downloading installer...".to_string(),
         percent: 0.0,
+        current_file_progress: None,
+        current_file_downloaded: None,
+        current_file_total: None,
     });
 
     let resp = client.get(&installer_url).send().await.map_err(|e| e.to_string())?;
@@ -371,6 +417,9 @@ async fn install_forge_or_neoforge(
         downloaded_files: 0,
         current_file: "Running installer...".to_string(),
         percent: 50.0,
+        current_file_progress: None,
+        current_file_downloaded: None,
+        current_file_total: None,
     });
 
     // Ensure launcher_profiles.json exists (required by Forge/NeoForge installer)
@@ -396,13 +445,24 @@ async fn install_forge_or_neoforge(
         level: "info".to_string(),
     });
 
-    let mut child = Command::new(&java)
-        .arg("-jar")
+    let mut cmd = Command::new(&java);
+    cmd.arg("-jar")
         .arg(&installer_path)
         .arg("--installClient")
         .arg(&mc_dir_str)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Ensure the installer targets the configured game directory (important on Windows).
+    if let Some(parent) = mc_dir.parent() {
+        if cfg!(target_os = "windows") {
+            cmd.env("APPDATA", parent);
+        } else {
+            cmd.env("HOME", parent);
+        }
+    }
+
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to start installer: {}", e))?;
 
@@ -447,6 +507,9 @@ async fn install_forge_or_neoforge(
         downloaded_files: 1,
         current_file: "Installation Complete".to_string(),
         percent: 100.0,
+        current_file_progress: None,
+        current_file_downloaded: None,
+        current_file_total: None,
     });
 
     Ok(())
@@ -456,6 +519,8 @@ async fn install_forge_or_neoforge(
 pub async fn download_single_file(app: AppHandle, url: String, path: String, task_id: Option<String>) -> Result<(), String> {
     let client = reqwest::Client::new();
     let path_buf = PathBuf::from(&path);
+    let cancel_key = get_cancel_key("SingleFile", &task_id);
+    let cancel_flag = app.state::<DownloadState>().get_cancel_flag(&cancel_key);
     
     if let Some(parent) = path_buf.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -468,14 +533,43 @@ pub async fn download_single_file(app: AppHandle, url: String, path: String, tas
         downloaded_files: 0,
         current_file: format!("Downloading {}...", path_buf.file_name().unwrap_or_default().to_string_lossy()),
         percent: 0.0,
+        current_file_progress: None,
+        current_file_downloaded: None,
+        current_file_total: None,
     });
 
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("Failed to download: {}", resp.status()));
     }
-    let content = resp.bytes().await.map_err(|e| e.to_string())?;
-    fs::write(&path_buf, content).map_err(|e| e.to_string())?;
+
+    let total = resp.content_length();
+    let mut downloaded_bytes = 0u64;
+    let mut file = fs::File::create(&path_buf).map_err(|e| e.to_string())?;
+    let mut stream = resp.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        if cancel_flag.load(Ordering::Relaxed) {
+            app.state::<DownloadState>().clear_cancel(&cancel_key);
+            return Err("Download cancelled".to_string());
+        }
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        file.write_all(&chunk).map_err(|e| e.to_string())?;
+        downloaded_bytes += chunk.len() as u64;
+
+        let file_percent = total.map(|t| (downloaded_bytes as f64 / t as f64) * 100.0);
+        let _ = app.emit("download-progress", DownloadProgress {
+            task_id: task_id.clone(),
+            version_id: "SingleFile".to_string(),
+            total_files: 1,
+            downloaded_files: 0,
+            current_file: path_buf.file_name().unwrap_or_default().to_string_lossy().to_string(),
+            percent: file_percent.unwrap_or(0.0),
+            current_file_progress: file_percent,
+            current_file_downloaded: Some(downloaded_bytes),
+            current_file_total: total,
+        });
+    }
 
     let _ = app.emit("download-progress", DownloadProgress {
         task_id: task_id.clone(),
@@ -484,7 +578,12 @@ pub async fn download_single_file(app: AppHandle, url: String, path: String, tas
         downloaded_files: 1,
         current_file: "Done".to_string(),
         percent: 100.0,
+        current_file_progress: Some(100.0),
+        current_file_downloaded: total,
+        current_file_total: total,
     });
+
+    app.state::<DownloadState>().clear_cancel(&cancel_key);
 
     Ok(())
 }
@@ -667,10 +766,15 @@ pub async fn prepare_fabric_downloads(client: &reqwest::Client, game_version: &s
 }
 
 pub async fn download_files(app: &AppHandle, version_id: &str, queue: Vec<(String, PathBuf, Option<String>)>, task_id: Option<String>) -> Result<(), String> {
+    const MAX_ATTEMPTS: u32 = 3;
+    const BASE_DELAY_MS: u64 = 500;
+
     let total_files = queue.len();
     let semaphore = Arc::new(Semaphore::new(10)); // Concurrency limit
     let client = reqwest::Client::new();
-    let mut downloaded = 0;
+    let completed = Arc::new(Mutex::new(0usize));
+    let cancel_key = get_cancel_key(version_id, &task_id);
+    let cancel_flag = app.state::<DownloadState>().get_cancel_flag(&cancel_key);
 
     let mut stream = futures::stream::iter(queue)
         .map(|(url, path, token)| {
@@ -678,30 +782,154 @@ pub async fn download_files(app: &AppHandle, version_id: &str, queue: Vec<(Strin
             let semaphore = semaphore.clone();
             let app = app.clone();
             let task_id = task_id.clone();
+            let completed = completed.clone();
             async move {
                 let _permit = semaphore.acquire().await.unwrap();
+                let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                if cancel_flag.load(Ordering::Relaxed) {
+                    return Err("Download cancelled".to_string());
+                }
                 if path.exists() {
+                    let mut completed_count = completed.lock().map_err(|e| e.to_string())?;
+                    *completed_count += 1;
+                    let overall_percent = if total_files == 0 {
+                        0.0
+                    } else {
+                        (*completed_count as f64 / total_files as f64) * 100.0
+                    };
+                    let _ = app.emit("download-progress", DownloadProgress {
+                        task_id: task_id.clone(),
+                        version_id: version_id.to_string(),
+                        total_files,
+                        downloaded_files: *completed_count,
+                        current_file: filename.clone(),
+                        percent: overall_percent,
+                        current_file_progress: None,
+                        current_file_downloaded: None,
+                        current_file_total: None,
+                    });
+                    let _ = app.emit("download-file-progress", DownloadFileProgress {
+                        task_id: task_id.clone(),
+                        filename: filename.clone(),
+                        progress: 100.0,
+                        status: "cached".to_string(),
+                    });
                     return Ok(());
                 }
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
                 }
                 
-                let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
                 let _ = app.emit("download-log", DownloadLog { task_id: task_id.clone(), message: format!("Downloading {}", filename), level: "info".to_string() });
 
-                let mut req = client.get(&url);
-                if let Some(t) = token {
-                    req = req.header("Authorization", format!("Bearer {}", t));
+                let mut last_error: Option<String> = None;
+
+                for attempt in 1..=MAX_ATTEMPTS {
+                    let mut req = client.get(&url);
+                    if let Some(t) = token.clone() {
+                        req = req.header("Authorization", format!("Bearer {}", t));
+                    }
+
+                    let result: Result<(), String> = async {
+                        let resp = req.send().await.map_err(|e| e.to_string())?;
+                        if !resp.status().is_success() {
+                            return Err(format!("HTTP {}", resp.status()));
+                        }
+                        let total = resp.content_length();
+                        let mut downloaded_bytes = 0u64;
+                        let mut file = fs::File::create(&path).map_err(|e| e.to_string())?;
+                        let mut stream = resp.bytes_stream();
+
+                        while let Some(chunk) = stream.next().await {
+                            if cancel_flag.load(Ordering::Relaxed) {
+                                return Err("Download cancelled".to_string());
+                            }
+                            let chunk = chunk.map_err(|e| e.to_string())?;
+                            file.write_all(&chunk).map_err(|e| e.to_string())?;
+                            downloaded_bytes += chunk.len() as u64;
+
+                            let file_percent = total.map(|t| (downloaded_bytes as f64 / t as f64) * 100.0);
+                            let completed_count = completed.lock().map_err(|e| e.to_string())?;
+                            let overall_percent = if total_files == 0 {
+                                0.0
+                            } else {
+                                (*completed_count as f64 / total_files as f64) * 100.0
+                            };
+                            let _ = app.emit("download-progress", DownloadProgress {
+                                task_id: task_id.clone(),
+                                version_id: version_id.to_string(),
+                                total_files,
+                                downloaded_files: *completed_count,
+                                current_file: filename.clone(),
+                                percent: overall_percent,
+                                current_file_progress: file_percent,
+                                current_file_downloaded: Some(downloaded_bytes),
+                                current_file_total: total,
+                            });
+                            let _ = app.emit("download-file-progress", DownloadFileProgress {
+                                task_id: task_id.clone(),
+                                filename: filename.clone(),
+                                progress: file_percent.unwrap_or(0.0),
+                                status: "downloading".to_string(),
+                            });
+                        }
+                        Ok(())
+                    }
+                    .await;
+
+                    match result {
+                        Ok(()) => {
+                            let mut completed_count = completed.lock().map_err(|e| e.to_string())?;
+                            *completed_count += 1;
+                            let overall_percent = if total_files == 0 {
+                                0.0
+                            } else {
+                                (*completed_count as f64 / total_files as f64) * 100.0
+                            };
+                            let _ = app.emit("download-progress", DownloadProgress {
+                                task_id: task_id.clone(),
+                                version_id: version_id.to_string(),
+                                total_files,
+                                downloaded_files: *completed_count,
+                                current_file: filename.clone(),
+                                percent: overall_percent,
+                                current_file_progress: Some(100.0),
+                                current_file_downloaded: None,
+                                current_file_total: None,
+                            });
+                            let _ = app.emit("download-file-progress", DownloadFileProgress {
+                                task_id: task_id.clone(),
+                                filename: filename.clone(),
+                                progress: 100.0,
+                                status: "done".to_string(),
+                            });
+                            return Ok::<(), String>(());
+                        },
+                        Err(e) => {
+                            last_error = Some(e);
+                            if attempt < MAX_ATTEMPTS {
+                                let delay = BASE_DELAY_MS * 2u64.pow(attempt - 1);
+                                let _ = app.emit(
+                                    "download-log",
+                                    DownloadLog {
+                                        task_id: task_id.clone(),
+                                        message: format!(
+                                            "Retry {}/{} for {} in {}ms",
+                                            attempt,
+                                            MAX_ATTEMPTS,
+                                            filename,
+                                            delay
+                                        ),
+                                        level: "warn".to_string(),
+                                    },
+                                );
+                                sleep(Duration::from_millis(delay)).await;
+                            }
+                        }
+                    }
                 }
 
-                let resp = req.send().await.map_err(|e| e.to_string())?;
-                if !resp.status().is_success() {
-                    return Err(format!("Failed to download {}: {}", url, resp.status()));
-                }
-                let content = resp.bytes().await.map_err(|e| e.to_string())?;
-                fs::write(&path, content).map_err(|e| e.to_string())?;
-                Ok::<(), String>(())
+                Err(last_error.unwrap_or_else(|| "Download failed".to_string()))
             }
         })
         .buffer_unordered(10);
@@ -713,15 +941,11 @@ pub async fn download_files(app: &AppHandle, version_id: &str, queue: Vec<(Strin
             // Continue or fail? For now, log and continue, but maybe should fail?
             // Ideally we retry.
         }
-        downloaded += 1;
-        let _ = app.emit("download-progress", DownloadProgress {
-            task_id: task_id.clone(),
-            version_id: version_id.to_string(),
-            total_files,
-            downloaded_files: downloaded,
-            current_file: format!("{}/{}", downloaded, total_files),
-            percent: (downloaded as f64 / total_files as f64) * 100.0,
-        });
+        if cancel_flag.load(Ordering::Relaxed) {
+            app.state::<DownloadState>().clear_cancel(&cancel_key);
+            return Err("Download cancelled".to_string());
+        }
     }
+    app.state::<DownloadState>().clear_cancel(&cancel_key);
     Ok(())
 }

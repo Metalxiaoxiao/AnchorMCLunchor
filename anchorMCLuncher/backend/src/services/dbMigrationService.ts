@@ -92,6 +92,22 @@ export const initDatabase = async () => {
       return rows[0].count > 0;
     };
 
+    const checkIndexExists = async (tableName: string, indexName: string) => {
+      const [rows] = await connection.query<any[]>(`
+        SELECT count(*) as count FROM information_schema.statistics
+        WHERE table_schema = ? AND table_name = ? AND index_name = ?
+      `, [dbName, tableName, indexName]);
+      return rows[0].count > 0;
+    };
+
+    const checkConstraintExists = async (tableName: string, constraintName: string) => {
+      const [rows] = await connection.query<any[]>(`
+        SELECT count(*) as count FROM information_schema.table_constraints
+        WHERE table_schema = ? AND table_name = ? AND constraint_name = ?
+      `, [dbName, tableName, constraintName]);
+      return rows[0].count > 0;
+    };
+
     // Patch Users Table
     if (!(await checkColumnExists('users', 'uuid'))) {
       console.log('Patching users table: adding uuid column');
@@ -122,6 +138,44 @@ export const initDatabase = async () => {
     if (!(await checkColumnExists('docker_servers', 'version'))) {
       console.log('Patching docker_servers table: adding version column');
       await connection.query('ALTER TABLE docker_servers ADD COLUMN version VARCHAR(50) DEFAULT NULL');
+    }
+
+    // Patch Servers Table to link docker containers
+    if (!(await checkColumnExists('servers', 'container_id'))) {
+      console.log('Patching servers table: adding container_id column');
+      await connection.query('ALTER TABLE servers ADD COLUMN container_id VARCHAR(255) DEFAULT NULL');
+    }
+
+    // Backfill container_id by port for existing docker entries
+    await connection.query(`
+      UPDATE servers s
+      JOIN docker_servers ds ON s.port = ds.port
+      SET s.container_id = ds.container_id
+      WHERE s.container_id IS NULL
+    `);
+
+    // Remove orphaned docker-backed servers before adding FK
+    await connection.query(`
+      DELETE FROM servers
+      WHERE container_id IS NOT NULL
+        AND container_id NOT IN (SELECT container_id FROM docker_servers)
+    `);
+
+    if (!(await checkIndexExists('docker_servers', 'uq_docker_servers_container_id'))) {
+      console.log('Patching docker_servers table: adding unique index on container_id');
+      await connection.query('ALTER TABLE docker_servers ADD UNIQUE KEY uq_docker_servers_container_id (container_id)');
+    }
+
+    if (!(await checkIndexExists('servers', 'idx_servers_container_id'))) {
+      console.log('Patching servers table: adding index on container_id');
+      await connection.query('ALTER TABLE servers ADD INDEX idx_servers_container_id (container_id)');
+    }
+
+    if (!(await checkConstraintExists('servers', 'fk_servers_container_id'))) {
+      console.log('Patching servers table: adding FK to docker_servers.container_id');
+      await connection.query(
+        'ALTER TABLE servers ADD CONSTRAINT fk_servers_container_id FOREIGN KEY (container_id) REFERENCES docker_servers(container_id) ON DELETE CASCADE'
+      );
     }
 
     console.log('Database migration completed successfully.');

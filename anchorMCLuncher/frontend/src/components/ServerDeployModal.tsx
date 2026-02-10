@@ -173,7 +173,7 @@ export const ServerDeployModal: React.FC<ServerDeployModalProps> = ({ isOpen, on
           </Select>
         </FormGroup>
         <ButtonGroup>
-          <Button onClick={onClose} disabled={loading}>取消</Button>
+          <Button onClick={onClose}>取消</Button>
           <Button $primary onClick={handleSubmit} disabled={loading}>
             {loading ? '部署中...' : '确认部署'}
           </Button>

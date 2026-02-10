@@ -108,11 +108,29 @@ const StatusMessage = styled.div<{ $error?: boolean }>`
   text-align: center;
 `;
 
+const ProgressBarContainer = styled.div`
+  width: 100%;
+  height: 8px;
+  background-color: #e2e8f0;
+  border-radius: 6px;
+  overflow: hidden;
+  margin-top: 1rem;
+`;
+
+const ProgressBarFill = styled.div<{ $percent: number }>`
+  height: 100%;
+  background-color: var(--accent-color);
+  width: ${props => props.$percent}%;
+  transition: width 0.3s ease;
+`;
+
 export const ServerDeployWindow: React.FC = () => {
   const [name, setName] = useState('');
   const [version, setVersion] = useState('1.20.4');
   const [ram, setRam] = useState('2G');
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const cancelRef = React.useRef(false);
   const [status, setStatus] = useState<{msg: string, error: boolean} | null>(null);
   const [localVersions, setLocalVersions] = useState<string[]>([]);
   const [useLocalVersion, setUseLocalVersion] = useState(false);
@@ -129,21 +147,24 @@ export const ServerDeployWindow: React.FC = () => {
       return;
     }
 
+    cancelRef.current = false;
     setLoading(true);
     setStatus(null);
+    setProgress(10);
 
     try {
       // 1. Create Server
       const server = await api.createDockerServer(name, version, ram);
+      setProgress(40);
       
       // 2. If local version selected, package and upload
       if (useLocalVersion) {
           setStatus({ msg: "正在打包并上传本地客户端文件...", error: false });
+          setProgress(55);
           
           const token = localStorage.getItem('token');
           // Construct upload URL. Assuming api.defaults.baseURL is set or we construct it manually.
-          // api.ts sets baseURL to 'http://localhost:3000/api'
-          const uploadUrl = `http://localhost:3000/api/docker/${server.container_id}/client-upload`;
+          const uploadUrl = `${api.getApiBaseUrl()}/docker/${server.container_id}/client-upload`;
 
           await invoke('package_and_upload_local_version', { 
               versionId: version, 
@@ -152,9 +173,17 @@ export const ServerDeployWindow: React.FC = () => {
               token: token || null,
               enableIsolation: null // or false
           });
+          setProgress(80);
+      }
+
+      if (cancelRef.current) {
+        setStatus({ msg: "已取消部署", error: true });
+        setLoading(false);
+        return;
       }
 
       await emit('server-deployed');
+      setProgress(100);
       setStatus({ msg: "服务器创建成功！窗口即将关闭...", error: false });
       setTimeout(() => {
         Window.getCurrent().close();
@@ -164,6 +193,11 @@ export const ServerDeployWindow: React.FC = () => {
       setStatus({ msg: `创建失败: ${error.message || '未知错误'}`, error: true });
       setLoading(false);
     }
+  };
+
+  const handleCancel = () => {
+    cancelRef.current = true;
+    Window.getCurrent().close();
   };
 
   return (
@@ -236,6 +270,12 @@ export const ServerDeployWindow: React.FC = () => {
           </Select>
         </FormGroup>
 
+        {loading && (
+          <ProgressBarContainer>
+            <ProgressBarFill $percent={progress} />
+          </ProgressBarContainer>
+        )}
+
         {status && (
           <StatusMessage $error={status.error}>
             {status.msg}
@@ -243,7 +283,7 @@ export const ServerDeployWindow: React.FC = () => {
         )}
 
         <ButtonGroup>
-          <Button onClick={() => Window.getCurrent().close()} disabled={loading}>取消</Button>
+          <Button onClick={handleCancel}>取消</Button>
           <Button $primary onClick={handleDeploy} disabled={loading}>
             {loading ? '部署中...' : '立即部署'}
           </Button>

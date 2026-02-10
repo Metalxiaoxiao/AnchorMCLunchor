@@ -19,13 +19,18 @@ import * as api from "./api";
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { ask } from '@tauri-apps/plugin-dialog';
+interface MemoryInfo {
+  total_mb: number;
+  available_mb: number;
+}
+
 
 
 // Styled Components
-const TitleBarContainer = styled.div`
+const TitleBarContainer = styled.div<{ $implicit?: boolean }>`
   height: 40px;
-  background: rgba(255, 255, 255, 0.6);
-  backdrop-filter: blur(10px);
+  background: ${props => props.$implicit ? 'transparent' : 'rgba(255, 255, 255, 0.6)'};
+  backdrop-filter: ${props => props.$implicit ? 'none' : 'blur(10px)'};
   user-select: none;
   display: flex;
   justify-content: space-between;
@@ -35,7 +40,7 @@ const TitleBarContainer = styled.div`
   left: 0;
   right: 0;
   z-index: 1000;
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: ${props => props.$implicit ? 'none' : '1px solid var(--border-color)'};
   border-radius: 12px 12px 0 0;
 `;
 
@@ -106,6 +111,16 @@ const TitleBarButton = styled.div<{ $isClose?: boolean }>`
   }
 `;
 
+const TitleBarIconButton = styled(TitleBarButton)`
+  width: 42px;
+  color: #64748b;
+
+  &:hover {
+    background-color: rgba(0, 0, 0, 0.05);
+    color: var(--accent-color);
+  }
+`;
+
 const MainContent = styled.div`
   height: 100vh;
   width: 100vw;
@@ -133,22 +148,6 @@ const LoginContainer = styled(Container)`
 
 
 
-const SettingsIcon = styled.div`
-  position: absolute;
-  top: 40px;
-  right: 20px;
-  font-size: 1.5rem;
-  cursor: pointer;
-  opacity: 0.7;
-  transition: opacity 0.2s;
-  z-index: 10;
-  color: #64748b;
-
-  &:hover {
-    opacity: 1;
-    color: var(--accent-color);
-  }
-`;
 
 const StatusArea = styled.div`
   margin-top: 1rem;
@@ -168,11 +167,25 @@ const SubTitle = styled.h2`
   margin-bottom: 2rem;
 `;
 
-function TitleBar({ activeTab, onTabChange, showTabs }: { activeTab: string, onTabChange: (tab: string) => void, showTabs: boolean }) {
+function TitleBar({
+  activeTab,
+  onTabChange,
+  showTabs,
+  showSettings,
+  onOpenSettings,
+  implicit
+}: {
+  activeTab: string,
+  onTabChange: (tab: string) => void,
+  showTabs: boolean,
+  showSettings?: boolean,
+  onOpenSettings?: () => void,
+  implicit?: boolean
+}) {
   const appWindow = new Window("main");
 
   return (
-    <TitleBarContainer data-tauri-drag-region>
+    <TitleBarContainer data-tauri-drag-region $implicit={implicit}>
       <TitleBarTitle data-tauri-drag-region>AnchorMC Launcher</TitleBarTitle>
       {showTabs && (
         <TabContainer>
@@ -182,6 +195,16 @@ function TitleBar({ activeTab, onTabChange, showTabs }: { activeTab: string, onT
         </TabContainer>
       )}
       <TitleBarControls>
+        {showSettings && (
+          <TitleBarIconButton onClick={onOpenSettings}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path
+                d="M12 8.5a3.5 3.5 0 1 1 0 7a3.5 3.5 0 0 1 0-7Zm8.94 2.34-1.58-.27a7.8 7.8 0 0 0-.62-1.5l.94-1.3a.75.75 0 0 0-.08-.98l-1.6-1.6a.75.75 0 0 0-.98-.08l-1.3.94c-.48-.24-.98-.45-1.5-.62l-.27-1.58a.75.75 0 0 0-.74-.62h-2.26a.75.75 0 0 0-.74.62l-.27 1.58c-.52.17-1.02.38-1.5.62l-1.3-.94a.75.75 0 0 0-.98.08l-1.6 1.6a.75.75 0 0 0-.08.98l.94 1.3c-.24.48-.45.98-.62 1.5l-1.58.27a.75.75 0 0 0-.62.74v2.26c0 .36.26.67.62.74l1.58.27c.17.52.38 1.02.62 1.5l-.94 1.3a.75.75 0 0 0 .08.98l1.6 1.6c.26.26.66.29.98.08l1.3-.94c.48.24.98.45 1.5.62l.27 1.58c.07.36.38.62.74.62h2.26c.36 0 .67-.26.74-.62l.27-1.58c.52-.17 1.02-.38 1.5-.62l1.3.94c.32.21.72.18.98-.08l1.6-1.6c.26-.26.29-.66.08-.98l-.94-1.3c.24-.48.45-.98.62-1.5l1.58-.27c.36-.07.62-.38.62-.74v-2.26a.75.75 0 0 0-.62-.74Z"
+                fill="currentColor"
+              />
+            </svg>
+          </TitleBarIconButton>
+        )}
         <TitleBarButton onClick={() => appWindow.minimize()}>
           <svg width="10" height="1" viewBox="0 0 10 1"><path d="M0 0h10v1H0z" fill="currentColor"/></svg>
         </TitleBarButton>
@@ -261,6 +284,10 @@ function App() {
     const savedUser = localStorage.getItem('user');
     return savedUser ? JSON.parse(savedUser) : null;
   });
+
+  useEffect(() => {
+    api.setApiBaseUrl(authServer);
+  }, [authServer]);
   const [isLoading, setIsLoading] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [servers, setServers] = useState<Server[]>([]);
@@ -492,6 +519,18 @@ function App() {
       
       if (savedConfig) {
         config = JSON.parse(savedConfig);
+      } else {
+        try {
+          const memoryInfo = await invoke<MemoryInfo>('get_memory_info');
+          const available = Math.max(memoryInfo.available_mb, 512);
+          const suggested = Math.max(512, Math.floor(available * 0.8));
+          config.maxMemory = suggested;
+          if (config.minMemory > suggested) {
+            config.minMemory = suggested;
+          }
+        } catch (e) {
+          console.error("Failed to read system memory:", e);
+        }
       }
 
       // Determine isolation based on global setting
@@ -677,7 +716,14 @@ function App() {
   return (
     <>
       <GlobalStyles />
-      <TitleBar activeTab={activeTab} onTabChange={setActiveTab} showTabs={false} />
+      <TitleBar
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        showTabs={false}
+        showSettings
+        onOpenSettings={() => setShowSettings(true)}
+        implicit
+      />
       <MessageModal 
         isOpen={isAlertOpen} 
         message={alertMsg} 
@@ -685,10 +731,6 @@ function App() {
         zIndex={4000}
       />
       <LoginContainer>
-        <SettingsIcon onClick={() => setShowSettings(true)}>
-          ⚙️
-        </SettingsIcon>
-
       <SettingsModal 
         isOpen={showSettings} 
         onClose={() => setShowSettings(false)} 

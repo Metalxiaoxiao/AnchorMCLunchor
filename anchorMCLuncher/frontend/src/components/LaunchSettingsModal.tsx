@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import styled from 'styled-components';
 import { invoke } from '@tauri-apps/api/core';
-import { save } from '@tauri-apps/plugin-dialog';
+import { save, ask } from '@tauri-apps/plugin-dialog';
 import { LoadingSpinner } from './LoadingSpinner';
 
 const ModalOverlay = styled.div`
@@ -98,6 +98,56 @@ const Input = styled.input`
     outline: none;
     border-color: var(--accent-color);
   }
+`;
+
+const RangeInput = styled.input`
+  width: 100%;
+  appearance: none;
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-color) 0%, #e2e8f0 100%);
+  outline: none;
+  transition: background 0.2s;
+
+  &::-webkit-slider-thumb {
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent-color);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    cursor: pointer;
+    border: 2px solid white;
+  }
+
+  &::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent-color);
+    cursor: pointer;
+    border: 2px solid white;
+  }
+`;
+
+const MemoryRow = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+`;
+
+const MemoryValue = styled.div`
+  font-weight: 600;
+  color: var(--text-color);
+  min-width: 120px;
+  text-align: right;
+`;
+
+const MemoryHint = styled.div`
+  color: #64748b;
+  font-size: 0.9rem;
+  margin-top: 0.4rem;
 `;
 
 const Row = styled.div`
@@ -256,9 +306,16 @@ interface VersionDetails {
   mc_path: string;
 }
 
+interface MemoryInfo {
+  total_mb: number;
+  available_mb: number;
+}
+
 export const LaunchSettingsModal: React.FC<LaunchSettingsModalProps> = ({ isOpen, onClose, versionId, onSave }) => {
   const [isExporting, setIsExporting] = useState(false);
   const [versionDetails, setVersionDetails] = useState<VersionDetails | null>(null);
+  const [memoryInfo, setMemoryInfo] = useState<MemoryInfo | null>(null);
+  const [hasSavedConfig, setHasSavedConfig] = useState(false);
   const [config, setConfig] = useState<VersionConfig>({
     minMemory: 1024,
     maxMemory: 4096,
@@ -301,10 +358,16 @@ export const LaunchSettingsModal: React.FC<LaunchSettingsModalProps> = ({ isOpen
 
   useEffect(() => {
     if (isOpen && versionId) {
+      invoke<MemoryInfo>('get_memory_info')
+        .then(setMemoryInfo)
+        .catch(console.error);
+
       const savedConfig = localStorage.getItem(`version_config_${versionId}`);
       if (savedConfig) {
+        setHasSavedConfig(true);
         setConfig(JSON.parse(savedConfig));
       } else {
+        setHasSavedConfig(false);
         // Default values
         setConfig({
           minMemory: 1024,
@@ -318,17 +381,53 @@ export const LaunchSettingsModal: React.FC<LaunchSettingsModalProps> = ({ isOpen
     }
   }, [isOpen, versionId]);
 
-  const handleChange = (field: keyof VersionConfig, value: string | number | boolean) => {
+  useEffect(() => {
+    if (!isOpen || hasSavedConfig || !memoryInfo) return;
+    const available = Math.max(memoryInfo.available_mb, 512);
+    const suggested = Math.max(512, Math.floor(available * 0.8));
     setConfig(prev => ({
       ...prev,
-      [field]: value
+      maxMemory: suggested,
+      minMemory: Math.min(prev.minMemory, suggested)
     }));
+  }, [isOpen, hasSavedConfig, memoryInfo]);
+
+  const handleChange = (field: keyof VersionConfig, value: string | number | boolean) => {
+    setConfig(prev => {
+      const next = { ...prev, [field]: value } as VersionConfig;
+      if (field === 'minMemory' && typeof value === 'number' && value > next.maxMemory) {
+        next.maxMemory = value;
+      }
+      if (field === 'maxMemory' && typeof value === 'number' && value < next.minMemory) {
+        next.minMemory = value;
+      }
+      return next;
+    });
   };
 
   const handleSave = () => {
     localStorage.setItem(`version_config_${versionId}`, JSON.stringify(config));
     onSave(config);
     onClose();
+  };
+
+  const handleDeleteVersion = async () => {
+    const yes = await ask(`确定要删除版本 ${versionId} 吗？此操作不可恢复。`, {
+      title: '删除版本',
+      kind: 'warning'
+    });
+
+    if (!yes) return;
+
+    try {
+      await invoke('delete_version', { versionId, gamePath: localStorage.getItem('gamePath') || null });
+      localStorage.removeItem(`version_config_${versionId}`);
+      alert('版本已删除');
+      onClose();
+    } catch (e: any) {
+      console.error(e);
+      alert(`删除失败: ${e.message || e}`);
+    }
   };
 
   const handleExport = async () => {
@@ -394,11 +493,22 @@ export const LaunchSettingsModal: React.FC<LaunchSettingsModalProps> = ({ isOpen
           </FormGroup>
           <FormGroup style={{ flex: 1 }}>
             <Label>最大内存 (MB)</Label>
-            <Input 
-              type="number" 
-              value={config.maxMemory} 
-              onChange={e => handleChange('maxMemory', parseInt(e.target.value) || 0)}
-            />
+            <MemoryRow>
+              <RangeInput
+                type="range"
+                min={512}
+                max={Math.max(512, memoryInfo?.available_mb || 16384)}
+                step={256}
+                value={config.maxMemory}
+                onChange={e => handleChange('maxMemory', parseInt(e.target.value) || 0)}
+              />
+              <MemoryValue>{config.maxMemory} MB</MemoryValue>
+            </MemoryRow>
+            <MemoryHint>
+              {memoryInfo
+                ? `系统可用内存 ${memoryInfo.available_mb} MB，默认使用 80% 空闲内存`
+                : '正在读取系统内存...'}
+            </MemoryHint>
           </FormGroup>
         </Row>
 
@@ -462,6 +572,12 @@ export const LaunchSettingsModal: React.FC<LaunchSettingsModalProps> = ({ isOpen
                   <path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/>
                 </svg>
                 打开 Mods 文件夹
+              </AdvancedActionButton>
+              <AdvancedActionButton onClick={handleDeleteVersion}>
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" style={{ marginRight: '0.5rem' }}>
+                  <path d="M6 7h12v2H6V7zm2 3h8l-1 9H9l-1-9zm3-6h2l1 2h-4l1-2z"/>
+                </svg>
+                删除版本
               </AdvancedActionButton>
             </div>
         </div>

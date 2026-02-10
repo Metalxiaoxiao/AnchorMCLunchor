@@ -42,6 +42,15 @@ export const stopServer = async (req: Request, res: Response) => {
     }
 };
 
+export const deleteServer = async (req: Request, res: Response) => {
+    try {
+        await dockerService.deleteDockerServer(req.params.id);
+        res.json({ message: "Server deleted" });
+    } catch (error: any) {
+        res.status(500).json({ message: error.message });
+    }
+};
+
 export const sendCommand = async (req: Request, res: Response) => {
     try {
         const { command } = req.body;

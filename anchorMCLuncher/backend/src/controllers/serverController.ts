@@ -1,14 +1,14 @@
 import { Request, Response } from 'express';
 import db from '../config/db';
 import { RowDataPacket, ResultSetHeader } from 'mysql2';
+import * as dockerService from '../services/dockerService';
 
 const getAllServers = async (req: Request, res: Response) => {
   try {
-    // Join with docker_servers to get container_id if it exists (matching by port)
     const query = `
       SELECT s.*, ds.container_id 
       FROM servers s 
-      LEFT JOIN docker_servers ds ON s.port = ds.port
+      LEFT JOIN docker_servers ds ON s.container_id = ds.container_id
     `;
     const [servers] = await db.query<RowDataPacket[]>(query);
     res.json(servers);
@@ -57,6 +57,22 @@ const deleteServer = async (req: Request, res: Response) => {
   const { id } = req.params;
 
   try {
+    const [rows] = await db.query<RowDataPacket[]>(
+      'SELECT id, container_id FROM servers WHERE id = ?',
+      [id]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ message: 'Server not found' });
+    }
+
+    const containerId = rows[0].container_id as string | null;
+
+    if (containerId) {
+      await dockerService.deleteDockerServer(containerId);
+      return res.json({ message: 'Docker server deleted successfully' });
+    }
+
     await db.query('DELETE FROM servers WHERE id = ?', [id]);
     res.json({ message: 'Server deleted successfully' });
   } catch (error) {

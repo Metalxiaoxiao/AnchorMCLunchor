@@ -7,7 +7,7 @@
     "start:frontend": "npm --prefix anchorMCLuncher/frontend run tauri dev",
     "build": "npm run build:backend && npm run build:frontend",
     "build:backend": "npm --prefix anchorMCLuncher/backend run build",
-    "build:frontend": "npm --prefix anchorMCLuncher/frontend run build"
+    "build:frontend": "npm --prefix anchorMCLuncher/frontend run tauri build"
   },
   "dependencies": {
     "@tauri-apps/plugin-dialog": "^2.4.2",

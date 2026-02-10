@@ -143,6 +143,7 @@ const ProgressBarContainer = styled.div`
   overflow: hidden;
 `;
 
+
 const ProgressBarFill = styled.div<{ $progress: number }>`
   height: 100%;
   width: ${props => props.$progress}%;
@@ -248,6 +249,9 @@ export interface DownloadProgress {
   downloaded_files: number;
   current_file: string;
   percent: number;
+  current_file_progress?: number | null;
+  current_file_downloaded?: number | null;
+  current_file_total?: number | null;
 }
 
 interface DownloadTabProps {

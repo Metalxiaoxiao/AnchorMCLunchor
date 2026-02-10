@@ -6,6 +6,7 @@ import { RowDataPacket, ResultSetHeader } from 'mysql2';
 import axios from 'axios';
 import { getCAFConfig } from '../services/cafService';
 import { v4 as uuidv4 } from 'uuid';
+import * as dockerService from '../services/dockerService';
 
 // In-memory store for login states (state -> { status, token, user })
 const loginStates = new Map<string, { status: 'pending' | 'success' | 'failed', token?: string, user?: any }>();
@@ -379,6 +380,21 @@ const deleteServer = async (req: Request, res: Response) => {
     return res.status(400).json({ message: 'Server id is required' });
   }
   try {
+    const [rows] = await db.query<RowDataPacket[]>(
+      'SELECT id, container_id FROM servers WHERE id = ?',
+      [id]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ message: 'Server not found' });
+    }
+
+    const containerId = rows[0].container_id as string | null;
+    if (containerId) {
+      await dockerService.deleteDockerServer(containerId);
+      return res.json({ message: 'Docker server deleted successfully' });
+    }
+
     await db.query('DELETE FROM servers WHERE id = ?', [id]);
     res.json({ message: 'Server deleted successfully' });
   } catch (error) {

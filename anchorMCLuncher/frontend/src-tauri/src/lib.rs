@@ -4,6 +4,7 @@ mod downloader;
 mod launcher;
 mod modrinth;
 mod server_ping;
+mod system_info;
 mod version_path;
 use tauri::Manager;
 #[cfg(target_os = "windows")]
@@ -68,8 +69,10 @@ pub fn run() {
             downloader::install_version,
             downloader::download_custom_files,
             downloader::download_single_file,
+            downloader::cancel_download,
             launcher::launch_game,
             launcher::list_installed_versions,
+            launcher::delete_version,
             launcher::package_local_version,
             launcher::export_modpack,
             launcher::package_and_upload_local_version,
@@ -87,7 +90,8 @@ pub fn run() {
             config::get_app_config,
             config::set_isolation_mode,
             focus_window,
-            ping_server
+            ping_server,
+            system_info::get_memory_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

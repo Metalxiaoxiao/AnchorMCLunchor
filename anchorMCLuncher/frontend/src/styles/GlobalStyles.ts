@@ -38,10 +38,9 @@ export const GlobalStyles = createGlobalStyle`
     overflow: hidden; 
     user-select: none;
   }
-    padding: 0;
-    overflow: hidden; 
+
+  body {
     background-color: transparent;
-    user-select: none;
   }
 
   input, button {

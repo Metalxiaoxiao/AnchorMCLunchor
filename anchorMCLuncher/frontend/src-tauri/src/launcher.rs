@@ -1,8 +1,10 @@
 use tauri::{AppHandle, Manager, Emitter};
 use std::process::{Command, Stdio};
 use std::path::PathBuf;
+use std::time::SystemTime;
 use std::io::{Read, BufRead, BufReader};
 use std::thread;
+use walkdir::WalkDir;
 
 #[derive(Debug, serde::Deserialize)]
 pub struct MinecraftAccount {
@@ -78,9 +80,38 @@ pub fn get_version_details(app: AppHandle, version_id: String, game_path: Option
     let file = std::fs::File::open(&json_path).map_err(|e| e.to_string())?;
     let json: serde_json::Value = serde_json::from_reader(file).map_err(|e| e.to_string())?;
     
-    let main_class = json["mainClass"].as_str().unwrap_or("");
-    let is_modded = main_class != "net.minecraft.client.main.Main";
     let version_type = json["type"].as_str().unwrap_or("release").to_string();
+    let mut main_class = json["mainClass"].as_str().unwrap_or("").to_string();
+
+    if main_class.is_empty() {
+        if let Some(parent_id) = json.get("inheritsFrom").and_then(|v| v.as_str()) {
+            let parent_dir = mc_dir.join("versions").join(parent_id);
+            let parent_json_path = parent_dir.join(format!("{}.json", parent_id));
+            if parent_json_path.exists() {
+                if let Ok(file) = std::fs::File::open(&parent_json_path) {
+                    if let Ok(p_json) = serde_json::from_reader::<_, serde_json::Value>(file) {
+                        if let Some(p_main) = p_json.get("mainClass").and_then(|v| v.as_str()) {
+                            main_class = p_main.to_string();
+                        } else if let Some(gp_id) = p_json.get("inheritsFrom").and_then(|v| v.as_str()) {
+                            let gp_dir = mc_dir.join("versions").join(gp_id);
+                            let gp_json_path = gp_dir.join(format!("{}.json", gp_id));
+                            if gp_json_path.exists() {
+                                if let Ok(gp_file) = std::fs::File::open(&gp_json_path) {
+                                    if let Ok(gp_json) = serde_json::from_reader::<_, serde_json::Value>(gp_file) {
+                                        if let Some(gp_main) = gp_json.get("mainClass").and_then(|v| v.as_str()) {
+                                            main_class = gp_main.to_string();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let is_modded = version_type == "modpack" || (!main_class.is_empty() && main_class != "net.minecraft.client.main.Main");
 
     Ok(VersionDetails {
         is_modded,
@@ -117,6 +148,49 @@ fn extract_natives(zip_path: &PathBuf, target_dir: &PathBuf) -> Result<(), Strin
             std::io::copy(&mut file, &mut outfile).map_err(|e| e.to_string())?;
         }
     }
+    Ok(())
+}
+
+fn apply_override_folders(game_dir: &PathBuf) -> Result<(), String> {
+    let override_roots = ["overrides", "client-overrides"];
+
+    for root in override_roots {
+        let src_root = game_dir.join(root);
+        if !src_root.exists() {
+            continue;
+        }
+
+        for entry in WalkDir::new(&src_root).into_iter().flatten() {
+            let path = entry.path();
+            let rel = match path.strip_prefix(&src_root) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            if rel.as_os_str().is_empty() {
+                continue;
+            }
+
+            if rel.components().next().map(|c| c.as_os_str().to_string_lossy()) == Some("server-overrides".into()) {
+                continue;
+            }
+
+            let dest = game_dir.join(rel);
+            if entry.file_type().is_dir() {
+                if !dest.exists() {
+                    std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+                }
+            } else if entry.file_type().is_file() {
+                if let Some(parent) = dest.parent() {
+                    if !parent.exists() {
+                        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                    }
+                }
+                std::fs::copy(path, &dest).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -362,8 +436,6 @@ pub async fn launch_game(
     let file = std::fs::File::open(&json_path).map_err(|e| e.to_string())?;
     let json: serde_json::Value = serde_json::from_reader(file).map_err(|e| e.to_string())?;
     
-    let main_class = json["mainClass"].as_str().ok_or("No mainClass found")?;
-    
     // Inheritance Handling
     let mut jar_path = version_dir.join(format!("{}.jar", version_id));
     let mut all_libraries = Vec::new();
@@ -446,6 +518,11 @@ pub async fn launch_game(
             return Err(format!("Version {} not installed (missing jar)", version_id));
         }
     }
+
+    let main_class = json["mainClass"].as_str()
+        .or_else(|| parent_json.as_ref().and_then(|p| p["mainClass"].as_str()))
+        .or_else(|| grandparent_json.as_ref().and_then(|g| g["mainClass"].as_str()))
+        .ok_or("No mainClass found")?;
 
     // Libraries
     let mut classpath = Vec::new();
@@ -643,8 +720,6 @@ pub async fn launch_game(
     }
 
     classpath.push(jar_path.to_string_lossy().to_string());
-    let cp_separator = if cfg!(target_os = "windows") { ";" } else { ":" };
-    let classpath_str = classpath.join(cp_separator);
 
     // Arguments
     let mut args = Vec::new();
@@ -830,6 +905,17 @@ pub async fn launch_game(
     // Process current JVM args
     parse_jvm_args(&json, &mut json_jvm_args);
 
+    let cp_separator = if cfg!(target_os = "windows") { ";" } else { ":" };
+    let jar_path_str = jar_path.to_string_lossy().to_string();
+    let is_module_launch = json_jvm_args.iter().any(|arg| arg == "-p" || arg == "--module-path" || arg == "--add-modules");
+    let classpath_entries: Vec<String> = if is_module_launch {
+        classpath.iter().filter(|p| *p != &jar_path_str).cloned().collect()
+    } else {
+        classpath.clone()
+    };
+    let classpath_str = classpath_entries.join(cp_separator);
+    let module_path_str = classpath_entries.join(cp_separator);
+
     // If no JVM args found in JSON, use defaults (Old versions or Vanilla 1.13+ without explicit JVM args)
     if json_jvm_args.is_empty() {
         args.push(format!("-Djava.library.path={}", natives_dir.to_string_lossy()));
@@ -837,12 +923,20 @@ pub async fn launch_game(
         args.push(classpath_str);
     } else {
         // Process placeholders in JSON JVM args
+        let mut replaced_jvm_args: Vec<String> = Vec::new();
         for arg in json_jvm_args {
+            let use_module_path = matches!(replaced_jvm_args.last().map(|s| s.as_str()), Some("-p") | Some("--module-path"));
+            let classpath_value = if use_module_path { &module_path_str } else { &classpath_str };
+
             let replaced = arg
                 .replace("${natives_directory}", &natives_dir.to_string_lossy())
+                .replace("${library_directory}", &lib_dir.to_string_lossy())
                 .replace("${launcher_name}", "AnchorMCLuncher")
                 .replace("${launcher_version}", "1.0")
-                .replace("${classpath}", &classpath_str);
+                .replace("${classpath}", classpath_value)
+                .replace("${classpath_separator}", cp_separator)
+                .replace("${version_name}", &version_id)
+                .replace("${version_type}", "release");
             
             // Fix for FabricMcEmu argument having spaces
             // Some versions of Fabric/Loader might have a malformed argument in their json or it's parsed incorrectly
@@ -853,13 +947,15 @@ pub async fn launch_game(
                 if parts.len() == 2 {
                     let key = parts[0];
                     let val = parts[1].trim();
-                    args.push(format!("{}={}", key, val));
+                    replaced_jvm_args.push(format!("{}={}", key, val));
                     continue;
                 }
             }
 
-            args.push(replaced);
+            replaced_jvm_args.push(replaced);
         }
+
+        args.extend(replaced_jvm_args);
     }
 
     args.push(main_class.to_string());
@@ -867,6 +963,18 @@ pub async fn launch_game(
     // Game Arguments Parsing
     let mut game_args = Vec::new();
     
+    let has_custom_resolution = width.is_some() || height.is_some();
+    let feature_flags: std::collections::HashMap<&str, bool> = [
+        ("is_demo_user", false),
+        ("has_custom_resolution", has_custom_resolution),
+        ("quickPlayPath", false),
+        ("quickPlaySingleplayer", false),
+        ("quickPlayMultiplayer", false),
+        ("quickPlayRealms", false)
+    ]
+    .into_iter()
+    .collect();
+
     let parse_args = |json_obj: &serde_json::Value, args_vec: &mut Vec<String>| {
         if let Some(args_node) = json_obj.get("arguments") {
             // New format (1.13+)
@@ -876,7 +984,45 @@ pub async fn launch_game(
                          if let Some(s) = item.as_str() {
                              args_vec.push(s.to_string());
                          } else if let Some(obj) = item.as_object() {
-                             if obj.get("rules").is_none() {
+                             let mut allowed = true;
+                             if let Some(rules) = obj.get("rules").and_then(|r| r.as_array()) {
+                                 allowed = false;
+                                 for rule in rules {
+                                     let action = rule["action"].as_str().unwrap_or("disallow");
+                                     let mut os_match = true;
+                                     let mut features_match = true;
+                                     if let Some(os) = rule.get("os").and_then(|v| v.as_object()) {
+                                         if let Some(name) = os.get("name").and_then(|v| v.as_str()) {
+                                             let current_os = if cfg!(target_os = "windows") { "windows" } else if cfg!(target_os = "macos") { "osx" } else { "linux" };
+                                             if name != current_os {
+                                                 os_match = false;
+                                             }
+                                         }
+                                         if let Some(arch) = os.get("arch").and_then(|v| v.as_str()) {
+                                             let current_arch = if cfg!(target_arch = "x86") { "x86" } else { "x64" };
+                                             if arch != current_arch {
+                                                 os_match = false;
+                                             }
+                                         }
+                                     }
+                                     if let Some(features) = rule.get("features").and_then(|v| v.as_object()) {
+                                         for (key, value) in features {
+                                             if let Some(expected) = value.as_bool() {
+                                                 let actual = *feature_flags.get(key.as_str()).unwrap_or(&false);
+                                                 if actual != expected {
+                                                     features_match = false;
+                                                     break;
+                                                 }
+                                             }
+                                         }
+                                     }
+                                     if os_match && features_match {
+                                         allowed = action == "allow";
+                                     }
+                                 }
+                             }
+
+                             if allowed {
                                  if let Some(val) = obj.get("value") {
                                      if let Some(s) = val.as_str() {
                                          args_vec.push(s.to_string());
@@ -901,21 +1047,31 @@ pub async fn launch_game(
         }
     };
 
-    // Process parent args first (if any)
+    // Process grandparent args first (if any)
+    if let Some(gp_json) = &grandparent_json {
+        parse_args(gp_json, &mut game_args);
+    }
+    // Process parent args
     if let Some(p_json) = &parent_json {
         parse_args(p_json, &mut game_args);
     }
     // Process current args
     parse_args(&json, &mut game_args);
 
-    // Resolution
+    // Resolution (only add if not already provided by version args)
+    let has_width_arg = game_args.iter().any(|arg| arg == "--width");
+    let has_height_arg = game_args.iter().any(|arg| arg == "--height");
     if let Some(w) = width {
-        game_args.push("--width".to_string());
-        game_args.push(w.to_string());
+        if !has_width_arg {
+            game_args.push("--width".to_string());
+            game_args.push(w.to_string());
+        }
     }
     if let Some(h) = height {
-        game_args.push("--height".to_string());
-        game_args.push(h.to_string());
+        if !has_height_arg {
+            game_args.push("--height".to_string());
+            game_args.push(h.to_string());
+        }
     }
 
     // Server Auto-Connect
@@ -955,6 +1111,11 @@ pub async fn launch_game(
              asset_index_id = p_json.get("assetIndex").and_then(|ai| ai.get("id")).and_then(|i| i.as_str()).unwrap_or("").to_string();
         }
     }
+    if asset_index_id.is_empty() {
+        if let Some(gp_json) = &grandparent_json {
+            asset_index_id = gp_json.get("assetIndex").and_then(|ai| ai.get("id")).and_then(|i| i.as_str()).unwrap_or("").to_string();
+        }
+    }
     
     let (username, uuid, access_token, user_type) = if let Some(acc) = account {
         (acc.username, acc.uuid, acc.access_token, acc.user_type)
@@ -962,11 +1123,21 @@ pub async fn launch_game(
         ("Player".to_string(), "00000000-0000-0000-0000-000000000000".to_string(), "00000000-0000-0000-0000-000000000000".to_string(), "mojang".to_string())
     };
 
+    let client_id = "0".to_string();
+    let auth_xuid = "0".to_string();
+
     // Determine Game Directory (Isolation)
     let final_game_dir = crate::version_path::get_game_working_dir(&app, &version_id, game_path.clone(), isolated)?;
     if !final_game_dir.exists() {
         std::fs::create_dir_all(&final_game_dir).map_err(|e| e.to_string())?;
     }
+
+    if let Err(e) = apply_override_folders(&final_game_dir) {
+        println!("Warning: Failed to apply override folders: {}", e);
+    }
+
+    let resolution_width = width.map(|w| w.to_string());
+    let resolution_height = height.map(|h| h.to_string());
 
     for arg in game_args {
         let replaced = arg
@@ -979,11 +1150,38 @@ pub async fn launch_game(
             .replace("${auth_access_token}", &access_token)
             .replace("${user_type}", &user_type)
             .replace("${version_type}", "release")
-            .replace("${user_properties}", "{}");
-            
+            .replace("${user_properties}", "{}")
+            .replace("${clientid}", &client_id)
+            .replace("${auth_xuid}", &auth_xuid);
+
+        let replaced = match (&resolution_width, &resolution_height) {
+            (Some(w), Some(h)) => replaced
+                .replace("${resolution_width}", w)
+                .replace("${resolution_height}", h),
+            (Some(w), None) => replaced.replace("${resolution_width}", w),
+            (None, Some(h)) => replaced.replace("${resolution_height}", h),
+            (None, None) => replaced,
+        };
+
+        if replaced.contains("${resolution_width}") || replaced.contains("${resolution_height}") {
+            continue;
+        }
+        
         args.push(replaced);
     }
     
+    for arg in args.iter_mut() {
+        if arg.contains("${classpath_separator}") {
+            *arg = arg.replace("${classpath_separator}", cp_separator);
+        }
+        if arg.contains("${version_name}") {
+            *arg = arg.replace("${version_name}", &version_id);
+        }
+        if arg.contains("${version_type}") {
+            *arg = arg.replace("${version_type}", "release");
+        }
+    }
+
     let _ = app.emit("launch-status", "Launching game process...");
 
     println!("Launch args: {:?}", args);
@@ -1072,6 +1270,17 @@ pub fn list_installed_versions(app: AppHandle, game_path: Option<String>) -> Res
     }
 
     Ok(versions)
+}
+
+#[tauri::command]
+pub fn delete_version(app: AppHandle, version_id: String, game_path: Option<String>) -> Result<(), String> {
+    let version_dir = crate::version_path::get_version_dir(&app, &version_id, game_path)?;
+    if !version_dir.exists() {
+        return Err(format!("Version {} not found", version_id));
+    }
+
+    std::fs::remove_dir_all(&version_dir).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1345,8 +1554,69 @@ struct ModrinthFile {
     downloads: Vec<String>,
 }
 
+fn find_installed_loader_version(
+    mc_dir: &PathBuf,
+    loader_type: &str,
+    mc_ver: &str,
+    loader_ver: &str
+) -> Option<String> {
+    let versions_dir = mc_dir.join("versions");
+    if !versions_dir.exists() {
+        return None;
+    }
+
+    let mut best: Option<(SystemTime, String)> = None;
+
+    if let Ok(entries) = std::fs::read_dir(versions_dir) {
+        for entry in entries.flatten() {
+            let dir_path = entry.path();
+            if !dir_path.is_dir() {
+                continue;
+            }
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            let json_path = dir_path.join(format!("{}.json", dir_name));
+            if !json_path.exists() {
+                continue;
+            }
+
+            let Ok(file) = std::fs::File::open(&json_path) else { continue; };
+            let Ok(json): Result<serde_json::Value, _> = serde_json::from_reader(file) else { continue; };
+            let Some(id) = json.get("id").and_then(|v| v.as_str()) else { continue; };
+
+            let type_match = match loader_type {
+                "forge" => id.contains("forge"),
+                "neoforge" => id.contains("neoforge"),
+                _ => false
+            };
+
+            if !type_match {
+                continue;
+            }
+
+            if !id.contains(mc_ver) || !id.contains(loader_ver) {
+                continue;
+            }
+
+            let modified = entry.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+            if best.as_ref().map(|(t, _)| modified > *t).unwrap_or(true) {
+                best = Some((modified, id.to_string()));
+            }
+        }
+    }
+
+    best.map(|(_, id)| id)
+}
+
 #[tauri::command]
-pub async fn import_modpack(app: AppHandle, path: String, token: Option<String>, _enable_isolation: Option<bool>, custom_name: Option<String>, task_id: Option<String>) -> Result<(), String> {
+pub async fn import_modpack(
+    app: AppHandle,
+    path: String,
+    token: Option<String>,
+    _enable_isolation: Option<bool>,
+    custom_name: Option<String>,
+    task_id: Option<String>,
+    game_path: Option<String>
+) -> Result<(), String> {
     // Determine isolation from config (Assume modpack is modded)
     let config = crate::config::load_config();
     let isolated = crate::config::should_isolate(&config.isolation_mode, true, "release");
@@ -1363,6 +1633,9 @@ pub async fn import_modpack(app: AppHandle, path: String, token: Option<String>,
             downloaded_files: 0,
             current_file: "Downloading modpack...".to_string(),
             percent: 0.0,
+            current_file_progress: None,
+            current_file_downloaded: None,
+            current_file_total: None,
         });
 
         let client = reqwest::Client::new();
@@ -1383,7 +1656,7 @@ pub async fn import_modpack(app: AppHandle, path: String, token: Option<String>,
         temp_file_path = Some(p);
     }
 
-    let mc_dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join(".minecraft");
+    let mc_dir = crate::version_path::get_game_root(&app, game_path)?;
     let file = std::fs::File::open(&zip_path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
 
@@ -1398,6 +1671,9 @@ pub async fn import_modpack(app: AppHandle, path: String, token: Option<String>,
             downloaded_files: 0,
             current_file: "Reading Modrinth Index...".to_string(),
             percent: 0.0,
+            current_file_progress: None,
+            current_file_downloaded: None,
+            current_file_total: None,
         });
 
         let index_content = {
@@ -1437,6 +1713,9 @@ pub async fn import_modpack(app: AppHandle, path: String, token: Option<String>,
                     downloaded_files: i,
                     current_file: "Extracting overrides...".to_string(),
                     percent: (i as f64 / total_files as f64) * 100.0,
+                    current_file_progress: None,
+                    current_file_downloaded: None,
+                    current_file_total: None,
                 });
             }
 
@@ -1465,8 +1744,12 @@ pub async fn import_modpack(app: AppHandle, path: String, token: Option<String>,
         // Dependencies: {"minecraft": "1.20.1", "fabric-loader": "0.14.21"}
         let client = reqwest::Client::new();
         let mut parent_version_id = None;
+        let mut loader_install: Option<(String, String)> = None;
+        let mut mc_version: Option<String> = None;
+        let mut loader_kind: Option<String> = None;
 
         if let Some(mc_ver) = index.dependencies.get("minecraft") {
+            mc_version = Some(mc_ver.to_string());
             // Download vanilla
             if let Ok((vanilla_queue, _)) = crate::downloader::prepare_vanilla_downloads(&client, mc_ver, &mc_dir).await {
                 queue.extend(vanilla_queue);
@@ -1476,11 +1759,43 @@ pub async fn import_modpack(app: AppHandle, path: String, token: Option<String>,
                  if let Ok((loader_queue, loader_id)) = crate::downloader::prepare_fabric_downloads(&client, mc_ver, fabric_ver, &mc_dir).await {
                      queue.extend(loader_queue);
                      parent_version_id = Some(loader_id);
+                     loader_kind = Some("fabric".to_string());
                  }
+            } else if let Some(neoforge_ver) = index.dependencies.get("neoforge") {
+                loader_install = Some(("neoforge".to_string(), neoforge_ver.to_string()));
+                loader_kind = Some("neoforge".to_string());
+            } else if let Some(forge_ver) = index.dependencies.get("forge") {
+                loader_install = Some(("forge".to_string(), forge_ver.to_string()));
+                loader_kind = Some("forge".to_string());
             }
         }
 
         crate::downloader::download_files(&app, "Modpack", queue, task_id.clone()).await?;
+
+        if let (Some(mc_ver), Some((loader_type, loader_ver))) = (mc_version.as_deref(), loader_install) {
+            crate::downloader::install_forge_or_neoforge(
+                &app,
+                &client,
+                mc_ver,
+                &loader_type,
+                &loader_ver,
+                &mc_dir,
+                None,
+                task_id.clone(),
+            )
+            .await?;
+
+            let detected = find_installed_loader_version(&mc_dir, &loader_type, mc_ver, &loader_ver);
+            parent_version_id = detected;
+            if parent_version_id.is_none() {
+                return Err(format!(
+                    "{} installer finished but no version json found (mc={}, loader={})",
+                    loader_type,
+                    mc_ver,
+                    loader_ver
+                ));
+            }
+        }
 
         // 4. Create Modpack Version JSON
         // If we have a parent version (loader), we create a JSON that inherits from it.
@@ -1494,13 +1809,16 @@ pub async fn import_modpack(app: AppHandle, path: String, token: Option<String>,
             // But usually modpacks are isolated.
             
             if isolated {
-                let json_content = serde_json::json!({
+                let mut json_content = serde_json::json!({
                     "id": version_id,
                     "inheritsFrom": parent_id,
                     "type": "modpack",
-                    "mainClass": "net.fabricmc.loader.impl.launch.knot.KnotClient",
                     "libraries": []
                 });
+
+                if loader_kind.as_deref() == Some("fabric") {
+                    json_content["mainClass"] = serde_json::Value::String("net.fabricmc.loader.impl.launch.knot.KnotClient".to_string());
+                }
                 // Note: mainClass might be redundant if inheritsFrom works correctly, but good to have.
                 // Actually, fabric loader json has the mainClass.
                 
@@ -1532,6 +1850,9 @@ pub async fn import_modpack(app: AppHandle, path: String, token: Option<String>,
             downloaded_files: 0,
             current_file: "Scanning...".to_string(),
             percent: 0.0,
+            current_file_progress: None,
+            current_file_downloaded: None,
+            current_file_total: None,
         });
 
         // 1. Scan for version ID
@@ -1580,27 +1901,49 @@ pub async fn import_modpack(app: AppHandle, path: String, token: Option<String>,
             downloaded_files: 0,
             current_file: "Extracting...".to_string(),
             percent: 0.0,
+            current_file_progress: None,
+            current_file_downloaded: None,
+            current_file_total: None,
         });
 
         for i in 0..archive.len() {
             let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
             let path = file.mangled_name();
             let path_str = path.to_string_lossy().to_string();
+            let mut override_relative: Option<String> = None;
+
+            if let Some(rel) = path_str.strip_prefix("overrides/") {
+                if !rel.is_empty() {
+                    override_relative = Some(rel.to_string());
+                }
+            } else if let Some(rel) = path_str.strip_prefix("client-overrides/") {
+                if !rel.is_empty() {
+                    override_relative = Some(rel.to_string());
+                }
+            } else if path_str.starts_with("server-overrides/") {
+                continue;
+            }
+
+            let effective_path = if let Some(rel) = &override_relative {
+                PathBuf::from(rel)
+            } else {
+                path.clone()
+            };
             
             // Determine output path
-            let out_path = if !version_id.is_empty() && version_id != "unknown" && Some(path_str.clone()) == version_json_path_in_zip {
+            let out_path = if override_relative.is_none() && !version_id.is_empty() && version_id != "unknown" && Some(path_str.clone()) == version_json_path_in_zip {
                  mc_dir.join("versions").join(&version_id).join(format!("{}.json", version_id))
-            } else if !version_id.is_empty() && version_id != "unknown" && custom_name.is_some() && path_str.ends_with(".jar") && version_json_path_in_zip.as_ref().map(|p| p.replace(".json", ".jar")) == Some(path_str.clone()) {
+            } else if override_relative.is_none() && !version_id.is_empty() && version_id != "unknown" && custom_name.is_some() && path_str.ends_with(".jar") && version_json_path_in_zip.as_ref().map(|p| p.replace(".json", ".jar")) == Some(path_str.clone()) {
                  // Rename jar if it matches the json name
                  mc_dir.join("versions").join(&version_id).join(format!("{}.jar", version_id))
             } else if isolated && !version_id.is_empty() && version_id != "unknown" {
                 if path_str.starts_with("assets/") || path_str.starts_with("libraries/") {
-                    mc_dir.join(&path)
+                    mc_dir.join(&effective_path)
                 } else {
-                    target_root.join(&path)
+                    target_root.join(&effective_path)
                 }
             } else {
-                mc_dir.join(&path)
+                mc_dir.join(&effective_path)
             };
             
             if file.is_dir() {
@@ -1642,6 +1985,9 @@ pub async fn import_modpack(app: AppHandle, path: String, token: Option<String>,
                 downloaded_files: 0,
                 current_file: "Resolving dependencies...".to_string(),
                 percent: 0.0,
+                current_file_progress: None,
+                current_file_downloaded: None,
+                current_file_total: None,
             });
 
             let version_json_path = mc_dir.join("versions").join(&final_version_id).join(format!("{}.json", final_version_id));
@@ -1741,6 +2087,9 @@ pub async fn import_modpack(app: AppHandle, path: String, token: Option<String>,
         downloaded_files: 100,
         current_file: "Import Complete".to_string(),
         percent: 100.0,
+        current_file_progress: None,
+        current_file_downloaded: None,
+        current_file_total: None,
     });
 
     Ok(())

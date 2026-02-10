@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS servers (
     name VARCHAR(255) NOT NULL,
     ip_address VARCHAR(255) NOT NULL,
     port INT DEFAULT 25565,
+    container_id VARCHAR(255) DEFAULT NULL,
     description TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

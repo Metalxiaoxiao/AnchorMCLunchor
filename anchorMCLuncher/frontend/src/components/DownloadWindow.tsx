@@ -39,6 +39,7 @@ const Title = styled.h3`
   margin-bottom: 20px;
   color: var(--text-color);
   text-align: center;
+  max-width: 320px;
 `;
 
 const ProgressBarContainer = styled.div`
@@ -49,6 +50,21 @@ const ProgressBarContainer = styled.div`
   overflow: hidden;
   margin-bottom: 10px;
 `;
+
+const FileBlocks = styled.div`
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(10px, 1fr));
+  gap: 4px;
+  margin-bottom: 10px;
+`;
+
+const FileBlock = styled.div<{ $percent: number }>`
+  height: 10px;
+  border-radius: 3px;
+  background: ${props => `linear-gradient(90deg, var(--accent-color) 0% ${props.$percent}%, #e2e8f0 ${props.$percent}% 100%)`};
+`;
+
 
 const ProgressBarFill = styled.div<{ $percent: number }>`
   height: 100%;
@@ -63,9 +79,14 @@ const StatusText = styled.div`
   margin-bottom: 5px;
   text-align: center;
   width: 100%;
+  max-width: 320px;
+  min-width: 320px;
+  height: 18px;
+  line-height: 18px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
 `;
 
 const PercentText = styled.div`
@@ -103,6 +124,16 @@ interface DownloadProgress {
   downloaded_files: number;
   current_file: string;
   percent: number;
+  current_file_progress?: number | null;
+  current_file_downloaded?: number | null;
+  current_file_total?: number | null;
+}
+
+interface DownloadFileProgress {
+  task_id?: string;
+  filename: string;
+  progress: number;
+  status: string;
 }
 
 interface DownloadLog {
@@ -119,6 +150,17 @@ export function DownloadWindow() {
   const isCompleteRef = useRef(false);
   const hasStartedRef = useRef(false);
   const logEndRef = useRef<HTMLDivElement>(null);
+  const [fileBlocks, setFileBlocks] = useState<Record<string, DownloadFileProgress>>({});
+  const maxBlocks = 80;
+
+  const renderBlocks = (completed: number, total: number) => {
+    const safeTotal = Math.max(total, 1);
+    const blockCount = Math.min(safeTotal, maxBlocks);
+    const filled = Math.round((completed / safeTotal) * blockCount);
+    return Array.from({ length: blockCount }, (_, i) => (
+      <ProgressBlock key={i} $active={i < filled} />
+    ));
+  };
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -128,6 +170,7 @@ export function DownloadWindow() {
     let unlistenFn: (() => void) | undefined;
     let unlistenLogFn: (() => void) | undefined;
     let unlistenCloseFn: (() => void) | undefined;
+    let unlistenFileFn: (() => void) | undefined;
 
     const init = async () => {
       const currentLabel = getCurrentWindow().label;
@@ -163,6 +206,21 @@ export function DownloadWindow() {
         });
       });
 
+      unlistenFileFn = await listen<DownloadFileProgress>('download-file-progress', (event) => {
+        if (event.payload.task_id && event.payload.task_id !== currentLabel) return;
+
+        setFileBlocks(prev => {
+          const next = { ...prev };
+          const isActive = event.payload.status === 'downloading';
+          if (isActive) {
+            next[event.payload.filename] = event.payload;
+          } else {
+            delete next[event.payload.filename];
+          }
+          return next;
+        });
+      });
+
       // Handle close request
       const appWindow = getCurrentWindow();
       unlistenCloseFn = await appWindow.onCloseRequested(async (event) => {
@@ -180,7 +238,7 @@ export function DownloadWindow() {
         });
         
         if (yes) {
-          // TODO: Implement cancel in backend
+          await invoke('cancel_download', { taskId: currentLabel });
           appWindow.destroy();
         }
       });
@@ -216,6 +274,7 @@ export function DownloadWindow() {
     return () => {
       if (unlistenFn) unlistenFn();
       if (unlistenLogFn) unlistenLogFn();
+      if (unlistenFileFn) unlistenFileFn();
       if (unlistenCloseFn) unlistenCloseFn();
     };
   }, []);
@@ -403,8 +462,16 @@ export function DownloadWindow() {
   async function startImport(path: string) {
     const currentLabel = getCurrentWindow().label;
     try {
+      const gamePath = localStorage.getItem('gamePath');
       setStatus("正在分析整合包...");
-      await invoke('import_modpack', { path, token: null, enableIsolation: null, customName: null, taskId: currentLabel });
+      await invoke('import_modpack', {
+        path,
+        token: null,
+        enableIsolation: null,
+        customName: null,
+        taskId: currentLabel,
+        gamePath: gamePath || null
+      });
       setStatus("导入完成！");
       isCompleteRef.current = true;
       setTimeout(() => {
@@ -430,6 +497,13 @@ export function DownloadWindow() {
             <ProgressBarContainer>
               <ProgressBarFill $percent={progress.percent} />
             </ProgressBarContainer>
+            {Object.keys(fileBlocks).length > 0 && (
+              <FileBlocks>
+                {Object.values(fileBlocks).map(file => (
+                  <FileBlock key={file.filename} $percent={Math.max(0, Math.min(100, file.progress))} />
+                ))}
+              </FileBlocks>
+            )}
             <StatusText>{status}</StatusText>
             <StatusText>{progress.downloaded_files} / {progress.total_files}</StatusText>
           </>

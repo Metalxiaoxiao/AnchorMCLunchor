@@ -117,7 +117,7 @@ export const ServerConfigTab: React.FC<ServerConfigTabProps> = ({ containerId })
   const [localVersions, setLocalVersions] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [modalState, setModalState] = useState<{ isOpen: boolean; message: string; type: 'info' | 'error' | 'success' }>({
+  const [modalState, setModalState] = useState<{ isOpen: boolean; message: string; type: 'info' | 'error' | 'confirm' }>({
     isOpen: false,
     message: '',
     type: 'info'
@@ -128,7 +128,7 @@ export const ServerConfigTab: React.FC<ServerConfigTabProps> = ({ containerId })
     fetchVersions();
   }, [containerId]);
 
-  const showModal = (message: string, type: 'info' | 'error' | 'success' = 'info') => {
+  const showModal = (message: string, type: 'info' | 'error' | 'confirm' = 'info') => {
     setModalState({ isOpen: true, message, type });
   };
 
@@ -165,7 +165,7 @@ export const ServerConfigTab: React.FC<ServerConfigTabProps> = ({ containerId })
 
         // Use Rust to package and upload directly to avoid freezing UI
         const token = localStorage.getItem('token');
-        const uploadUrl = `http://localhost:3000/api/docker/${containerId}/client-upload`;
+        const uploadUrl = `${api.getApiBaseUrl()}/docker/${containerId}/client-upload`;
         
         const filename = await invoke<string>('package_and_upload_local_version', { 
             versionId: configValue, 
@@ -180,11 +180,11 @@ export const ServerConfigTab: React.FC<ServerConfigTabProps> = ({ containerId })
         // Update local state to reflect the change
         setConfigValue(filename);
         
-        showModal("已打包并上传整合包", 'success');
+        showModal("已打包并上传整合包", 'info');
         
       } else {
         await api.updateClientConfig(containerId, configType, configValue);
-        showModal("配置已保存", 'success');
+        showModal("配置已保存", 'info');
       }
     } catch (e: any) {
       console.error(e);
@@ -201,7 +201,7 @@ export const ServerConfigTab: React.FC<ServerConfigTabProps> = ({ containerId })
         const file = e.target.files[0];
         const result = await api.uploadClientFile(containerId, file);
         setConfigValue(result.filename);
-        showModal("上传成功", 'success');
+        showModal("上传成功", 'info');
       } catch (e) {
         console.error(e);
         showModal("上传失败", 'error');

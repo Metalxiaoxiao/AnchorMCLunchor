@@ -3,7 +3,21 @@ use tauri::{AppHandle, Manager};
 
 pub fn get_game_root(app: &AppHandle, custom_path: Option<String>) -> Result<PathBuf, String> {
     if let Some(path) = custom_path {
-        Ok(PathBuf::from(path))
+        let mut root = PathBuf::from(path);
+        if let Some(name) = root.file_name().and_then(|s| s.to_str()) {
+            if name != "versions" {
+                if let Some(parent) = root.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()) {
+                    if parent == "versions" {
+                        if let Some(grandparent) = root.parent().and_then(|p| p.parent()) {
+                            root = grandparent.to_path_buf();
+                        }
+                    }
+                }
+            } else if let Some(parent) = root.parent() {
+                root = parent.to_path_buf();
+            }
+        }
+        Ok(root)
     } else {
         Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join(".minecraft"))
     }
