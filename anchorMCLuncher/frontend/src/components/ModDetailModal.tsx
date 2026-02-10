@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { ask } from '@tauri-apps/plugin-dialog';
 import ReactMarkdown from 'react-markdown';
 import { LoadingSpinner } from './LoadingSpinner';
+import { ChoiceModal } from './ChoiceModal';
 
 const slideIn = keyframes`
   from { transform: translateY(20px); opacity: 0; }
@@ -13,60 +14,6 @@ const slideIn = keyframes`
 const fadeIn = keyframes`
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
-`;
-
-const ChoiceModalOverlay = styled.div`
-  position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(0,0,0,0.5);
-  z-index: 3000;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  backdrop-filter: blur(5px);
-  animation: ${fadeIn} 0.2s ease-out;
-`;
-
-const ChoiceContainer = styled.div`
-  background: white;
-  padding: 2rem;
-  border-radius: 16px;
-  display: flex;
-  gap: 2rem;
-  box-shadow: 0 10px 25px rgba(0,0,0,0.2);
-`;
-
-const ChoiceButton = styled.button`
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1rem;
-  padding: 2rem;
-  border: 2px solid transparent;
-  border-radius: 12px;
-  background: #f8fafc;
-  cursor: pointer;
-  transition: all 0.2s;
-  width: 160px;
-
-  &:hover {
-    background: #e2e8f0;
-    transform: translateY(-5px);
-    border-color: var(--accent-color);
-    box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-  }
-
-  svg {
-    width: 48px;
-    height: 48px;
-    fill: var(--accent-color);
-  }
-
-  span {
-    font-weight: bold;
-    color: var(--text-color);
-    font-size: 1rem;
-  }
 `;
 
 const ModalOverlay = styled.div`
@@ -805,26 +752,37 @@ export const ModDetailModal: React.FC<Props> = ({
         )}
       </ModalContent>
 
-      {showInstallChoice && (
-        <ChoiceModalOverlay onClick={() => setShowInstallChoice(false)}>
-          <ChoiceContainer onClick={e => e.stopPropagation()}>
-            {currentVersion && (
-              <ChoiceButton onClick={handleInstallToGame}>
-                <svg viewBox="0 0 24 24">
-                  <path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/>
-                </svg>
-                <span>安装到 {currentVersion}</span>
-              </ChoiceButton>
-            )}
-            <ChoiceButton onClick={handleSaveAs}>
+      <ChoiceModal
+        isOpen={showInstallChoice}
+        onClose={() => setShowInstallChoice(false)}
+        onSelect={(id) => {
+          if (id === 'install') {
+            handleInstallToGame();
+          } else if (id === 'save') {
+            handleSaveAs();
+          }
+        }}
+        options={[
+          ...(currentVersion ? [{
+            id: 'install',
+            label: `安装到 ${currentVersion}`,
+            icon: (
+              <svg viewBox="0 0 24 24">
+                <path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/>
+              </svg>
+            )
+          }] : []),
+          {
+            id: 'save',
+            label: '另存为...',
+            icon: (
               <svg viewBox="0 0 24 24">
                 <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
               </svg>
-              <span>另存为...</span>
-            </ChoiceButton>
-          </ChoiceContainer>
-        </ChoiceModalOverlay>
-      )}
+            )
+          }
+        ]}
+      />
     </ModalOverlay>
   );
 };

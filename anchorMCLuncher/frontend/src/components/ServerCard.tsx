@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import styled, { keyframes, css } from 'styled-components';
 import { Server, DockerServer, ServerStatus } from '../types';
 import { invoke } from '@tauri-apps/api/core';
-import { PlayIcon, StopIcon, CommandLineIcon, ArrowDownTrayIcon } from '@heroicons/react/24/solid';
+import { PlayIcon, StopIcon, CommandLineIcon, ArrowDownTrayIcon, TrashIcon } from '@heroicons/react/24/solid';
 
 interface ServerCardProps {
   server: Server | DockerServer;
@@ -11,6 +11,7 @@ interface ServerCardProps {
   onStart?: (id: string) => void;
   onStop?: (id: string) => void;
   onConsole?: (id: string) => void;
+  onDelete?: (id: string) => void;
 }
 
 const pixelFloat = keyframes`
@@ -360,7 +361,8 @@ export const ServerCard: React.FC<ServerCardProps> = ({
   onJoin, 
   onStart, 
   onStop, 
-  onConsole 
+  onConsole,
+  onDelete
 }) => {
   const [dockerStatus, setDockerStatus] = useState<ServerStatus | null>(null);
   const isDocker = isDockerServer(server);
@@ -522,19 +524,18 @@ export const ServerCard: React.FC<ServerCardProps> = ({
         {isDocker ? (
           // Docker Server Actions
           <>
+            {onConsole && (
+              <ActionButton onClick={() => onConsole(server.container_id)} title="控制台" $variant="secondary">
+                <CommandLineIcon />
+              </ActionButton>
+            )}
             {server.status === 'running' ? (
               <>
-                {onConsole && (
-                  <ActionButton onClick={() => onConsole(server.container_id)} title="控制台" $variant="secondary">
-                    <CommandLineIcon />
-                  </ActionButton>
-                )}
                 {onStop && (
                   <ActionButton onClick={() => onStop(server.container_id)} title="停止" $variant="danger">
                     <StopIcon />
                   </ActionButton>
                 )}
-                {/* Join Button for Docker */}
                 {onJoin && (
                     <ActionButton onClick={handleJoin} title="加入游戏" $variant="primary">
                         <PlayIcon />
@@ -549,6 +550,11 @@ export const ServerCard: React.FC<ServerCardProps> = ({
                   </ActionButton>
                 )}
               </>
+            )}
+            {onDelete && (
+              <ActionButton onClick={() => onDelete(server.container_id)} title="删除" $variant="danger">
+                <TrashIcon />
+              </ActionButton>
             )}
           </>
         ) : (

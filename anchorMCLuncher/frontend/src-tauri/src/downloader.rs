@@ -783,6 +783,7 @@ pub async fn download_files(app: &AppHandle, version_id: &str, queue: Vec<(Strin
             let app = app.clone();
             let task_id = task_id.clone();
             let completed = completed.clone();
+            let cancel_flag = cancel_flag.clone();
             async move {
                 let _permit = semaphore.acquire().await.unwrap();
                 let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();

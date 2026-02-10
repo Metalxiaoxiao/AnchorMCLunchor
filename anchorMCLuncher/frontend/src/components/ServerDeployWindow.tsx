@@ -3,7 +3,9 @@ import styled from 'styled-components';
 import { Window } from '@tauri-apps/api/window';
 import { emit } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { ask } from '@tauri-apps/plugin-dialog';
 import * as api from '../api';
+import { ChoiceModal } from './ChoiceModal';
 
 const Container = styled.div`
   display: flex;
@@ -73,6 +75,55 @@ const Select = styled.select`
   box-sizing: border-box;
 `;
 
+const MemoryRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+`;
+
+const RangeInput = styled.input`
+  width: 100%;
+  appearance: none;
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-color) 0%, #e2e8f0 100%);
+  outline: none;
+  transition: background 0.2s;
+
+  &::-webkit-slider-thumb {
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent-color);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    cursor: pointer;
+    border: 2px solid white;
+  }
+
+  &::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent-color);
+    cursor: pointer;
+    border: 2px solid white;
+  }
+`;
+
+const MemoryValue = styled.div`
+  font-weight: 600;
+  color: var(--text-color);
+  min-width: 120px;
+  text-align: right;
+`;
+
+const MemoryHint = styled.div`
+  color: #64748b;
+  font-size: 0.9rem;
+  margin-top: 0.4rem;
+`;
+
 const ButtonGroup = styled.div`
   display: flex;
   justify-content: flex-end;
@@ -127,19 +178,35 @@ const ProgressBarFill = styled.div<{ $percent: number }>`
 export const ServerDeployWindow: React.FC = () => {
   const [name, setName] = useState('');
   const [version, setVersion] = useState('1.20.4');
-  const [ram, setRam] = useState('2G');
+  const [ramMb, setRamMb] = useState(2048);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
   const cancelRef = React.useRef(false);
   const [status, setStatus] = useState<{msg: string, error: boolean} | null>(null);
   const [localVersions, setLocalVersions] = useState<string[]>([]);
   const [useLocalVersion, setUseLocalVersion] = useState(false);
+  const [deployTaskId, setDeployTaskId] = useState<string | null>(null);
+  const [deploySource, setDeploySource] = useState<EventSource | null>(null);
+  const [packChoiceOpen, setPackChoiceOpen] = useState(false);
+  const packChoiceResolver = React.useRef<((format: 'modrinth' | 'curseforge' | null) => void) | null>(null);
+  const [memoryInfo, setMemoryInfo] = useState<{ total_mb: number; available_mb: number } | null>(null);
 
   useEffect(() => {
     invoke<string[]>('list_installed_versions', { gamePath: null })
       .then(setLocalVersions)
       .catch(console.error);
+    api.getDockerHostMemory()
+      .then(setMemoryInfo)
+      .catch(console.error);
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (deploySource) {
+        deploySource.close();
+      }
+    };
+  }, [deploySource]);
 
   const handleDeploy = async () => {
     if (!name) {
@@ -152,25 +219,77 @@ export const ServerDeployWindow: React.FC = () => {
     setStatus(null);
     setProgress(10);
 
+    const taskId = `deploy-${Date.now()}`;
+    setDeployTaskId(taskId);
+    const source = new EventSource(api.getDeployProgressUrl(taskId));
+    setDeploySource(source);
+
+    source.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (typeof payload.percent === 'number') {
+          setProgress(payload.percent);
+        }
+        if (payload.message) {
+          setStatus({ msg: payload.message, error: Boolean(payload.error) });
+        }
+      } catch (e) {
+        console.error('Invalid deploy progress payload', e);
+      }
+    };
+
+    source.onerror = () => {
+      source.close();
+    };
+
     try {
+      let runtime: { mcVersion?: string; loaderType?: string; loaderVersion?: string } | undefined;
+      if (useLocalVersion) {
+        try {
+          const info = await invoke<{ mc_version?: string; loader_type?: string; loader_version?: string }>('get_version_runtime_info', {
+            versionId: version,
+            gamePath: null
+          });
+          runtime = {
+            mcVersion: info.mc_version,
+            loaderType: info.loader_type,
+            loaderVersion: info.loader_version
+          };
+        } catch (e) {
+          console.error("Failed to resolve version runtime info", e);
+        }
+      }
       // 1. Create Server
-      const server = await api.createDockerServer(name, version, ram);
+      const server = await api.createDockerServer(name, version, `${ramMb}M`, taskId, runtime);
       setProgress(40);
       
       // 2. If local version selected, package and upload
       if (useLocalVersion) {
+          const packFormat = await new Promise<'modrinth' | 'curseforge' | null>((resolve) => {
+            packChoiceResolver.current = resolve;
+            setPackChoiceOpen(true);
+          });
+
+          if (!packFormat) {
+            setStatus({ msg: "已取消打包", error: true });
+            setLoading(false);
+            return;
+          }
+
           setStatus({ msg: "正在打包并上传本地客户端文件...", error: false });
           setProgress(55);
           
           const token = localStorage.getItem('token');
           // Construct upload URL. Assuming api.defaults.baseURL is set or we construct it manually.
-          const uploadUrl = `${api.getApiBaseUrl()}/docker/${server.container_id}/client-upload`;
+          const containerId = server.container_id || server.containerId;
+          const uploadUrl = `${api.getApiBaseUrl()}/docker/${containerId}/client-upload?taskId=${encodeURIComponent(taskId)}`;
 
           await invoke('package_and_upload_local_version', { 
               versionId: version, 
               gamePath: null,
               uploadUrl: uploadUrl,
               token: token || null,
+              packFormat: packFormat,
               enableIsolation: null // or false
           });
           setProgress(80);
@@ -197,7 +316,14 @@ export const ServerDeployWindow: React.FC = () => {
 
   const handleCancel = () => {
     cancelRef.current = true;
-    Window.getCurrent().close();
+    if (deployTaskId) {
+      ask('是否删除已创建的服务器？', { title: '取消部署', kind: 'warning' })
+        .then((deleteServer) => api.cancelDeploy(deployTaskId, Boolean(deleteServer)))
+        .catch(console.error)
+        .finally(() => Window.getCurrent().close());
+    } else {
+      Window.getCurrent().close();
+    }
   };
 
   return (
@@ -261,13 +387,22 @@ export const ServerDeployWindow: React.FC = () => {
 
         <FormGroup>
           <Label>内存分配</Label>
-          <Select value={ram} onChange={e => setRam(e.target.value)}>
-            <option value="1G">1 GB</option>
-            <option value="2G">2 GB</option>
-            <option value="4G">4 GB</option>
-            <option value="6G">6 GB</option>
-            <option value="8G">8 GB</option>
-          </Select>
+          <MemoryRow>
+            <RangeInput
+              type="range"
+              min={512}
+              max={Math.max(1024, memoryInfo?.available_mb || 16384)}
+              step={256}
+              value={ramMb}
+              onChange={e => setRamMb(parseInt(e.target.value, 10) || 1024)}
+            />
+            <MemoryValue>{ramMb} MB</MemoryValue>
+          </MemoryRow>
+          <MemoryHint>
+            {memoryInfo
+              ? `系统可用内存 ${memoryInfo.available_mb} MB`
+              : '正在读取系统内存...'}
+          </MemoryHint>
         </FormGroup>
 
         {loading && (
@@ -289,6 +424,44 @@ export const ServerDeployWindow: React.FC = () => {
           </Button>
         </ButtonGroup>
       </Content>
+      <ChoiceModal
+        isOpen={packChoiceOpen}
+        onClose={() => {
+          setPackChoiceOpen(false);
+          if (packChoiceResolver.current) {
+            packChoiceResolver.current(null);
+            packChoiceResolver.current = null;
+          }
+        }}
+        onSelect={(id) => {
+          if (packChoiceResolver.current) {
+            const value = id === 'modrinth' || id === 'curseforge' ? id : null;
+            packChoiceResolver.current(value as 'modrinth' | 'curseforge' | null);
+            packChoiceResolver.current = null;
+          }
+          setPackChoiceOpen(false);
+        }}
+        options={[
+          {
+            id: 'modrinth',
+            label: 'Modrinth 风格 (.mrpack)',
+            icon: (
+              <svg viewBox="0 0 24 24">
+                <path d="M12 2l9 5v10l-9 5-9-5V7l9-5zm0 2.3L5 7.2v7.6l7 3.9 7-3.9V7.2l-7-2.9z"/>
+              </svg>
+            )
+          },
+          {
+            id: 'curseforge',
+            label: 'CurseForge 风格 (.zip)',
+            icon: (
+              <svg viewBox="0 0 24 24">
+                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+              </svg>
+            )
+          }
+        ]}
+      />
     </Container>
   );
 };

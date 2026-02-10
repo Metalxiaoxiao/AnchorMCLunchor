@@ -28,6 +28,8 @@ const ConsoleContainer = styled.div`
   box-shadow: 0 0 20px rgba(0,0,0,0.5);
   color: #d4d4d4;
   font-family: 'Consolas', 'Monaco', monospace;
+  user-select: text;
+  -webkit-user-select: text;
 `;
 
 const Header = styled.div`
@@ -71,6 +73,8 @@ const ContentArea = styled.div`
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  user-select: text;
+  -webkit-user-select: text;
 `;
 
 const Terminal = styled.div`
@@ -81,6 +85,9 @@ const Terminal = styled.div`
   white-space: pre-wrap;
   font-size: 14px;
   line-height: 1.4;
+  user-select: text;
+  cursor: text;
+  -webkit-user-select: text;
 `;
 
 const InputArea = styled.div`

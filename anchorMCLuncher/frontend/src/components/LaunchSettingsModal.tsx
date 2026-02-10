@@ -3,6 +3,7 @@ import styled from 'styled-components';
 import { invoke } from '@tauri-apps/api/core';
 import { save, ask } from '@tauri-apps/plugin-dialog';
 import { LoadingSpinner } from './LoadingSpinner';
+import { ChoiceModal } from './ChoiceModal';
 
 const ModalOverlay = styled.div`
   position: fixed;
@@ -313,6 +314,8 @@ interface MemoryInfo {
 
 export const LaunchSettingsModal: React.FC<LaunchSettingsModalProps> = ({ isOpen, onClose, versionId, onSave }) => {
   const [isExporting, setIsExporting] = useState(false);
+  const [packChoiceOpen, setPackChoiceOpen] = useState(false);
+  const packChoiceResolver = React.useRef<((format: 'modrinth' | 'curseforge' | null) => void) | null>(null);
   const [versionDetails, setVersionDetails] = useState<VersionDetails | null>(null);
   const [memoryInfo, setMemoryInfo] = useState<MemoryInfo | null>(null);
   const [hasSavedConfig, setHasSavedConfig] = useState(false);
@@ -434,12 +437,20 @@ export const LaunchSettingsModal: React.FC<LaunchSettingsModalProps> = ({ isOpen
     if (isExporting) return;
     
     try {
+      const packFormat = await new Promise<'modrinth' | 'curseforge' | null>((resolve) => {
+        packChoiceResolver.current = resolve;
+        setPackChoiceOpen(true);
+      });
+
+      if (!packFormat) return;
+
+      const isModrinth = packFormat === 'modrinth';
       const filePath = await save({
         filters: [{
-          name: 'Modpack',
-          extensions: ['zip']
+          name: isModrinth ? 'Modrinth Pack' : 'CurseForge Pack',
+          extensions: [isModrinth ? 'mrpack' : 'zip']
         }],
-        defaultPath: `${versionId}-modpack.zip`
+        defaultPath: `${versionId}-modpack.${isModrinth ? 'mrpack' : 'zip'}`
       });
 
       if (!filePath) return;
@@ -450,6 +461,7 @@ export const LaunchSettingsModal: React.FC<LaunchSettingsModalProps> = ({ isOpen
         versionId: versionId, 
         gamePath: null, 
         destPath: filePath,
+        packFormat: packFormat,
         enableIsolation: null
       });
       
@@ -583,6 +595,44 @@ export const LaunchSettingsModal: React.FC<LaunchSettingsModalProps> = ({ isOpen
         </div>
 
       </ModalContent>
+      <ChoiceModal
+        isOpen={packChoiceOpen}
+        onClose={() => {
+          setPackChoiceOpen(false);
+          if (packChoiceResolver.current) {
+            packChoiceResolver.current(null);
+            packChoiceResolver.current = null;
+          }
+        }}
+        onSelect={(id) => {
+          if (packChoiceResolver.current) {
+            const value = id === 'modrinth' || id === 'curseforge' ? id : null;
+            packChoiceResolver.current(value as 'modrinth' | 'curseforge' | null);
+            packChoiceResolver.current = null;
+          }
+          setPackChoiceOpen(false);
+        }}
+        options={[
+          {
+            id: 'modrinth',
+            label: 'Modrinth 风格 (.mrpack)',
+            icon: (
+              <svg viewBox="0 0 24 24">
+                <path d="M12 2l9 5v10l-9 5-9-5V7l9-5zm0 2.3L5 7.2v7.6l7 3.9 7-3.9V7.2l-7-2.9z"/>
+              </svg>
+            )
+          },
+          {
+            id: 'curseforge',
+            label: 'CurseForge 风格 (.zip)',
+            icon: (
+              <svg viewBox="0 0 24 24">
+                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+              </svg>
+            )
+          }
+        ]}
+      />
     </ModalOverlay>
   );
 };

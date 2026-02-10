@@ -3,6 +3,7 @@ import styled from 'styled-components';
 import { invoke } from '@tauri-apps/api/core';
 import * as api from '../api';
 import { MessageModal } from './MessageModal';
+import { ChoiceModal } from './ChoiceModal';
 
 const Container = styled.div`
   padding: 2rem;
@@ -117,6 +118,7 @@ export const ServerConfigTab: React.FC<ServerConfigTabProps> = ({ containerId })
   const [localVersions, setLocalVersions] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [packChoiceOpen, setPackChoiceOpen] = useState(false);
   const [modalState, setModalState] = useState<{ isOpen: boolean; message: string; type: 'info' | 'error' | 'confirm' }>({
     isOpen: false,
     message: '',
@@ -162,30 +164,44 @@ export const ServerConfigTab: React.FC<ServerConfigTabProps> = ({ containerId })
           setLoading(false);
           return;
         }
-
-        // Use Rust to package and upload directly to avoid freezing UI
-        const token = localStorage.getItem('token');
-        const uploadUrl = `${api.getApiBaseUrl()}/docker/${containerId}/client-upload`;
-        
-        const filename = await invoke<string>('package_and_upload_local_version', { 
-            versionId: configValue, 
-            gamePath: null,
-            uploadUrl: uploadUrl,
-            token: token
-        });
-
-        // Update config to point to the uploaded file with type 'modpack'
-        await api.updateClientConfig(containerId, 'modpack', filename);
-        
-        // Update local state to reflect the change
-        setConfigValue(filename);
-        
-        showModal("已打包并上传整合包", 'info');
-        
-      } else {
-        await api.updateClientConfig(containerId, configType, configValue);
-        showModal("配置已保存", 'info');
+        setLoading(false);
+        setPackChoiceOpen(true);
+        return;
       }
+
+      await api.updateClientConfig(containerId, configType, configValue);
+      showModal("配置已保存", 'info');
+    } catch (e: any) {
+      console.error(e);
+      showModal("保存失败: " + (e.message || e), 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePackChoice = async (format: 'modrinth' | 'curseforge') => {
+    setPackChoiceOpen(false);
+    setLoading(true);
+    try {
+      if (!configValue) {
+        showModal("请选择一个本地版本", 'error');
+        return;
+      }
+
+      const token = localStorage.getItem('token');
+      const uploadUrl = `${api.getApiBaseUrl()}/docker/${containerId}/client-upload`;
+
+      const filename = await invoke<string>('package_and_upload_local_version', {
+        versionId: configValue,
+        gamePath: null,
+        uploadUrl: uploadUrl,
+        token: token,
+        packFormat: format
+      });
+
+      await api.updateClientConfig(containerId, 'modpack', filename);
+      setConfigValue(filename);
+      showModal("已打包并上传整合包", 'info');
     } catch (e: any) {
       console.error(e);
       showModal("保存失败: " + (e.message || e), 'error');
@@ -323,6 +339,35 @@ export const ServerConfigTab: React.FC<ServerConfigTabProps> = ({ containerId })
         onClose={() => setModalState(prev => ({ ...prev, isOpen: false }))}
         type={modalState.type}
         zIndex={4000}
+      />
+      <ChoiceModal
+        isOpen={packChoiceOpen}
+        onClose={() => setPackChoiceOpen(false)}
+        onSelect={(id) => {
+          if (id === 'modrinth' || id === 'curseforge') {
+            handlePackChoice(id as 'modrinth' | 'curseforge');
+          }
+        }}
+        options={[
+          {
+            id: 'modrinth',
+            label: 'Modrinth 风格 (.mrpack)',
+            icon: (
+              <svg viewBox="0 0 24 24">
+                <path d="M12 2l9 5v10l-9 5-9-5V7l9-5zm0 2.3L5 7.2v7.6l7 3.9 7-3.9V7.2l-7-2.9z"/>
+              </svg>
+            )
+          },
+          {
+            id: 'curseforge',
+            label: 'CurseForge 风格 (.zip)',
+            icon: (
+              <svg viewBox="0 0 24 24">
+                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+              </svg>
+            )
+          }
+        ]}
       />
     </Container>
   );

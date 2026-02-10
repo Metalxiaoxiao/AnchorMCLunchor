@@ -2,9 +2,10 @@ use tauri::{AppHandle, Manager, Emitter};
 use std::process::{Command, Stdio};
 use std::path::PathBuf;
 use std::time::SystemTime;
-use std::io::{Read, BufRead, BufReader};
+use std::io::{Read, BufRead, BufReader, Write};
 use std::thread;
 use walkdir::WalkDir;
+use serde_json::json;
 
 #[derive(Debug, serde::Deserialize)]
 pub struct MinecraftAccount {
@@ -20,6 +21,13 @@ pub struct VersionDetails {
     pub version_type: String,
     pub version_path: String,
     pub mc_path: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct VersionRuntimeInfo {
+    pub mc_version: Option<String>,
+    pub loader_type: Option<String>,
+    pub loader_version: Option<String>,
 }
 
 #[tauri::command]
@@ -118,6 +126,87 @@ pub fn get_version_details(app: AppHandle, version_id: String, game_path: Option
         version_type,
         version_path: version_dir.to_string_lossy().to_string(),
         mc_path: mc_dir.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+pub fn get_version_runtime_info(app: AppHandle, version_id: String, game_path: Option<String>) -> Result<VersionRuntimeInfo, String> {
+    let mc_dir = crate::version_path::get_game_root(&app, game_path.clone())?;
+    let version_dir = crate::version_path::get_version_dir(&app, &version_id, game_path.clone())?;
+    let json_path = version_dir.join(format!("{}.json", version_id));
+
+    if !json_path.exists() {
+        return Err(format!("Version {} not found", version_id));
+    }
+
+    let file = std::fs::File::open(&json_path).map_err(|e| e.to_string())?;
+    let json: serde_json::Value = serde_json::from_reader(file).map_err(|e| e.to_string())?;
+
+    let mut candidate_ids: Vec<String> = Vec::new();
+    if let Some(inherits) = json.get("inheritsFrom").and_then(|v| v.as_str()) {
+        candidate_ids.push(inherits.to_string());
+    }
+    if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
+        candidate_ids.push(id.to_string());
+    }
+
+    let mut loader_type: Option<String> = None;
+    let mut loader_version: Option<String> = None;
+    let mut mc_version: Option<String> = None;
+
+    for id in candidate_ids.iter() {
+        if id.starts_with("fabric-loader-") {
+            loader_type = Some("fabric".to_string());
+            let tail = id.trim_start_matches("fabric-loader-");
+            if let Some((lv, mv)) = tail.split_once('-') {
+                loader_version = Some(lv.to_string());
+                mc_version = Some(mv.to_string());
+            }
+            break;
+        }
+        if id.starts_with("forge-") {
+            loader_type = Some("forge".to_string());
+            let tail = id.trim_start_matches("forge-");
+            if let Some((mv, lv)) = tail.split_once('-') {
+                mc_version = Some(mv.to_string());
+                loader_version = Some(lv.to_string());
+            }
+            break;
+        }
+        if id.starts_with("neoforge-") {
+            loader_type = Some("neoforge".to_string());
+            let tail = id.trim_start_matches("neoforge-");
+            if let Some((mv, lv)) = tail.split_once('-') {
+                mc_version = Some(mv.to_string());
+                loader_version = Some(lv.to_string());
+            }
+            break;
+        }
+        if id.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            mc_version = Some(id.to_string());
+            loader_type = Some("vanilla".to_string());
+            break;
+        }
+    }
+
+    if mc_version.is_none() {
+        if let Some(parent_id) = json.get("inheritsFrom").and_then(|v| v.as_str()) {
+            let parent_dir = mc_dir.join("versions").join(parent_id);
+            let parent_json_path = parent_dir.join(format!("{}.json", parent_id));
+            if parent_json_path.exists() {
+                let parent_file = std::fs::File::open(&parent_json_path).map_err(|e| e.to_string())?;
+                let parent_json: serde_json::Value = serde_json::from_reader(parent_file).map_err(|e| e.to_string())?;
+                if let Some(gp_id) = parent_json.get("inheritsFrom").and_then(|v| v.as_str()) {
+                    mc_version = Some(gp_id.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(VersionRuntimeInfo {
+        mc_version,
+        loader_type,
+        loader_version,
     })
 }
 
@@ -1363,69 +1452,156 @@ pub fn package_local_version(app: AppHandle, version_id: String, game_path: Opti
     Ok(buffer)
 }
 
-#[tauri::command]
-pub fn export_modpack(app: AppHandle, version_id: String, game_path: Option<String>, dest_path: String, _enable_isolation: Option<bool>) -> Result<(), String> {
-    // Determine isolation from config
-    let details = get_version_details(app.clone(), version_id.clone(), game_path.clone())?;
-    let config = crate::config::load_config();
-    let isolated = crate::config::should_isolate(&config.isolation_mode, details.is_modded, &details.version_type);
+#[derive(Clone, Copy)]
+enum PackFormat {
+    Modrinth,
+    Curseforge,
+}
 
-    let mc_dir = crate::version_path::get_game_root(&app, game_path.clone())?;
-    let version_dir = crate::version_path::get_version_dir(&app, &version_id, game_path.clone())?;
-    if !version_dir.exists() {
-        return Err(format!("Version {} not found", version_id));
+fn parse_pack_format(value: Option<String>) -> PackFormat {
+    let normalized = value.unwrap_or_else(|| "curseforge".to_string()).to_lowercase();
+    match normalized.as_str() {
+        "modrinth" | "mrpack" => PackFormat::Modrinth,
+        "curseforge" | "curse" | "cf" => PackFormat::Curseforge,
+        _ => PackFormat::Curseforge,
+    }
+}
+
+fn add_dir_to_zip(zip: &mut zip::ZipWriter<std::fs::File>, dir: &PathBuf, prefix: &str) -> Result<(), String> {
+    if !dir.exists() {
+        return Ok(());
     }
 
-    let file = std::fs::File::create(&dest_path).map_err(|e| e.to_string())?;
+    let options = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    for entry in WalkDir::new(dir).into_iter().flatten() {
+        let path = entry.path();
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let rel = path.strip_prefix(dir).map_err(|e| e.to_string())?;
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        let zip_path = format!("{}/{}", prefix.trim_end_matches('/'), rel_str);
+        zip.start_file(zip_path, options).map_err(|e| e.to_string())?;
+        let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        std::io::copy(&mut f, zip).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn build_modpack_archive(
+    app: AppHandle,
+    version_id: String,
+    game_path: Option<String>,
+    enable_isolation: Option<bool>,
+    dest_path: &PathBuf,
+    format: PackFormat,
+) -> Result<(), String> {
+    let details = get_version_details(app.clone(), version_id.clone(), game_path.clone())?;
+    let config = crate::config::load_config();
+    let isolated = enable_isolation.unwrap_or_else(|| crate::config::should_isolate(&config.isolation_mode, details.is_modded, &details.version_type));
+
+    let mods_dir = crate::version_path::get_mods_dir(&app, &version_id, game_path.clone(), isolated)?;
+    let config_dir = crate::version_path::get_config_dir(&app, &version_id, game_path.clone(), isolated)?;
+
+    let file = std::fs::File::create(dest_path).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    // Add version files
-    for entry in std::fs::read_dir(&version_dir).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        if path.is_file() {
-            let name = path.file_name().unwrap().to_string_lossy();
-            zip.start_file(format!("versions/{}/{}", version_id, name), options).map_err(|e| e.to_string())?;
-            let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-            std::io::copy(&mut f, &mut zip).map_err(|e| e.to_string())?;
-        }
-    }
+    let runtime = get_version_runtime_info(app.clone(), version_id.clone(), game_path.clone()).unwrap_or(VersionRuntimeInfo {
+        mc_version: None,
+        loader_type: None,
+        loader_version: None,
+    });
 
-    // Add mods folder
-    let mods_dir = crate::version_path::get_mods_dir(&app, &version_id, game_path.clone(), isolated)?;
-    if mods_dir.exists() {
-        for entry in std::fs::read_dir(&mods_dir).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let path = entry.path();
-            if path.is_file() {
-                let name = path.file_name().unwrap().to_string_lossy();
-                zip.start_file(format!("mods/{}", name), options).map_err(|e| e.to_string())?;
-                let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-                std::io::copy(&mut f, &mut zip).map_err(|e| e.to_string())?;
+    if matches!(format, PackFormat::Modrinth) {
+        let mut deps = serde_json::Map::new();
+        if let Some(mc) = runtime.mc_version.clone() {
+            deps.insert("minecraft".to_string(), json!(mc));
+        }
+        if let Some(loader) = runtime.loader_type.clone() {
+            let key = match loader.as_str() {
+                "fabric" => "fabric-loader",
+                "quilt" => "quilt-loader",
+                "forge" => "forge",
+                "neoforge" => "neoforge",
+                _ => "",
+            };
+            if !key.is_empty() {
+                let value = runtime.loader_version.clone().unwrap_or_else(|| "".to_string());
+                deps.insert(key.to_string(), json!(value));
             }
         }
+
+        let index = json!({
+            "formatVersion": 1,
+            "game": "minecraft",
+            "versionId": version_id,
+            "name": version_id,
+            "summary": "",
+            "files": [],
+            "dependencies": deps
+        });
+
+        zip.start_file("modrinth.index.json", options).map_err(|e| e.to_string())?;
+        let data = serde_json::to_vec_pretty(&index).map_err(|e| e.to_string())?;
+        zip.write_all(&data).map_err(|e| e.to_string())?;
+    } else {
+        let mut mod_loaders = Vec::new();
+        if let Some(loader) = runtime.loader_type.clone() {
+            if let Some(ver) = runtime.loader_version.clone() {
+                let id = match loader.as_str() {
+                    "fabric" => format!("fabric-{}", ver),
+                    "quilt" => format!("quilt-{}", ver),
+                    "forge" => format!("forge-{}", ver),
+                    "neoforge" => format!("neoforge-{}", ver),
+                    _ => "".to_string(),
+                };
+                if !id.is_empty() {
+                    mod_loaders.push(json!({ "id": id, "primary": true }));
+                }
+            }
+        }
+
+        let manifest = json!({
+            "manifestType": "minecraftModpack",
+            "manifestVersion": 1,
+            "name": version_id,
+            "version": "1.0.0",
+            "author": "AMCLauncher",
+            "files": [],
+            "overrides": "overrides",
+            "minecraft": {
+                "version": runtime.mc_version.unwrap_or_else(|| "".to_string()),
+                "modLoaders": mod_loaders
+            }
+        });
+
+        zip.start_file("manifest.json", options).map_err(|e| e.to_string())?;
+        let data = serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?;
+        zip.write_all(&data).map_err(|e| e.to_string())?;
     }
 
-    // Add config folder
-    let config_dir = crate::version_path::get_config_dir(&app, &version_id, game_path.clone(), isolated)?;
-    if config_dir.exists() {
-         let walk = walkdir::WalkDir::new(&config_dir);
-         for entry in walk {
-             let entry = entry.map_err(|e| e.to_string())?;
-             let path = entry.path();
-             if path.is_file() {
-                 let relative = path.strip_prefix(&config_dir).map_err(|e| e.to_string())?;
-                 let relative_str = format!("config/{}", relative.to_string_lossy().replace('\\', "/"));
-                 zip.start_file(relative_str, options).map_err(|e| e.to_string())?;
-                 let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
-                 std::io::copy(&mut f, &mut zip).map_err(|e| e.to_string())?;
-             }
-         }
-    }
-    
+    add_dir_to_zip(&mut zip, &mods_dir, "overrides/mods")?;
+    add_dir_to_zip(&mut zip, &config_dir, "overrides/config")?;
+
     zip.finish().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn export_modpack(
+    app: AppHandle,
+    version_id: String,
+    game_path: Option<String>,
+    dest_path: String,
+    pack_format: Option<String>,
+    enable_isolation: Option<bool>
+) -> Result<(), String> {
+    let format = parse_pack_format(pack_format);
+    let dest = PathBuf::from(dest_path);
+    build_modpack_archive(app, version_id, game_path, enable_isolation, &dest, format)
 }
 
 #[derive(serde::Deserialize)]
@@ -1440,72 +1616,16 @@ pub async fn package_and_upload_local_version(
     game_path: Option<String>,
     upload_url: String,
     token: Option<String>,
+    pack_format: Option<String>,
     enable_isolation: Option<bool>
 ) -> Result<String, String> {
+    let format = parse_pack_format(pack_format);
+    let ext = if matches!(format, PackFormat::Modrinth) { "mrpack" } else { "zip" };
+
     // 1. Create a temporary file
     let temp_dir = std::env::temp_dir();
-    let temp_file_path = temp_dir.join(format!("{}-modpack.zip", version_id));
-    
-    // Helper function to package
-    // We duplicate logic here to avoid complex refactoring for now, but ideally this should be shared.
-    {
-        let isolated = enable_isolation.unwrap_or(false);
-        let version_dir = crate::version_path::get_version_dir(&app, &version_id, game_path.clone())?;
-
-        if !version_dir.exists() {
-            return Err(format!("Version {} not found", version_id));
-        }
-
-        let file = std::fs::File::create(&temp_file_path).map_err(|e| e.to_string())?;
-        let mut zip = zip::ZipWriter::new(file);
-        let options = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-
-        // Add version files
-        for entry in std::fs::read_dir(&version_dir).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let path = entry.path();
-            if path.is_file() {
-                let name = path.file_name().unwrap().to_string_lossy();
-                zip.start_file(format!("versions/{}/{}", version_id, name), options).map_err(|e| e.to_string())?;
-                let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-                std::io::copy(&mut f, &mut zip).map_err(|e| e.to_string())?;
-            }
-        }
-
-        // Add mods folder
-        let mods_dir = crate::version_path::get_mods_dir(&app, &version_id, game_path.clone(), isolated)?;
-        if mods_dir.exists() {
-            for entry in std::fs::read_dir(&mods_dir).map_err(|e| e.to_string())? {
-                let entry = entry.map_err(|e| e.to_string())?;
-                let path = entry.path();
-                if path.is_file() {
-                    let name = path.file_name().unwrap().to_string_lossy();
-                    zip.start_file(format!("mods/{}", name), options).map_err(|e| e.to_string())?;
-                    let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-                    std::io::copy(&mut f, &mut zip).map_err(|e| e.to_string())?;
-                }
-            }
-        }
-
-        // Add config folder
-        let config_dir = crate::version_path::get_config_dir(&app, &version_id, game_path.clone(), isolated)?;
-        if config_dir.exists() {
-             let walk = walkdir::WalkDir::new(&config_dir);
-             for entry in walk {
-                 let entry = entry.map_err(|e| e.to_string())?;
-                 let path = entry.path();
-                 if path.is_file() {
-                     let relative = path.strip_prefix(&config_dir).map_err(|e| e.to_string())?;
-                     let relative_str = format!("config/{}", relative.to_string_lossy().replace('\\', "/"));
-                     zip.start_file(relative_str, options).map_err(|e| e.to_string())?;
-                     let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
-                     std::io::copy(&mut f, &mut zip).map_err(|e| e.to_string())?;
-                 }
-             }
-        }
-        
-        zip.finish().map_err(|e| e.to_string())?;
-    }
+    let temp_file_path = temp_dir.join(format!("{}-modpack.{}", version_id, ext));
+    build_modpack_archive(app.clone(), version_id.clone(), game_path.clone(), enable_isolation, &temp_file_path, format)?;
 
     // 2. Upload the file
     let client = reqwest::Client::new();
@@ -1513,7 +1633,7 @@ pub async fn package_and_upload_local_version(
     // Read file content
     let file_content = std::fs::read(&temp_file_path).map_err(|e| e.to_string())?;
     let part = reqwest::multipart::Part::bytes(file_content)
-        .file_name(format!("{}-modpack.zip", version_id))
+        .file_name(format!("{}-modpack.{}", version_id, ext))
         .mime_str("application/zip")
         .map_err(|e| e.to_string())?;
 
@@ -1529,9 +1649,14 @@ pub async fn package_and_upload_local_version(
     }
 
     let response = request.send().await.map_err(|e| e.to_string())?;
-    
-    if !response.status().is_success() {
-        return Err(format!("Upload failed with status: {}", response.status()));
+    let status = response.status();
+
+    if !status.is_success() {
+        let detail = response.text().await.unwrap_or_default();
+        if detail.trim().is_empty() {
+            return Err(format!("Upload failed with status: {}", status));
+        }
+        return Err(format!("Upload failed with status: {}: {}", status, detail));
     }
 
     let result: UploadResponse = response.json().await.map_err(|e| e.to_string())?;

@@ -1,0 +1,9 @@
+{
+  "watch": ["src"],
+  "ignore": [
+    "uploads/**",
+    "minecraft_servers/**",
+    "dist/**",
+    "**/*.log"
+  ]
+}

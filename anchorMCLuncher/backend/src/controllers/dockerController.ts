@@ -1,12 +1,14 @@
 import { Request, Response } from 'express';
+import * as os from 'os';
 import * as dockerService from '../services/dockerService';
 
 export const createServer = async (req: Request, res: Response) => {
     try {
-        const { name, version, ram } = req.body;
+        const { name, version, ram, runtime } = req.body;
+        const taskId = req.body.taskId as string | undefined;
         // @ts-ignore
         const userId = req.user.id; 
-        const result = await dockerService.createServer(userId, name, version, ram);
+        const result = await dockerService.createServer(userId, name, version, ram, taskId, runtime);
         res.json(result);
     } catch (error: any) {
         res.status(500).json({ message: error.message });
@@ -19,6 +21,16 @@ export const listServers = async (req: Request, res: Response) => {
         const userId = req.user.id;
         const servers = await dockerService.listServers(userId);
         res.json(servers);
+    } catch (error: any) {
+        res.status(500).json({ message: error.message });
+    }
+};
+
+export const getHostMemory = async (_req: Request, res: Response) => {
+    try {
+        const totalMb = Math.floor(os.totalmem() / 1024 / 1024);
+        const availableMb = Math.floor(os.freemem() / 1024 / 1024);
+        res.json({ total_mb: totalMb, available_mb: availableMb });
     } catch (error: any) {
         res.status(500).json({ message: error.message });
     }
@@ -126,8 +138,48 @@ export const uploadClientFile = async (req: Request, res: Response) => {
     try {
         if (!req.file) throw new Error("No file uploaded");
         const type = req.body.type || 'full';
-        const filename = await dockerService.uploadClientFile(req.params.id, req.file, type);
+        const taskId = (req.query.taskId as string) || (req.headers['x-task-id'] as string | undefined);
+        if (taskId) {
+            dockerService.reportDeployProgress(taskId, { stage: 'upload-client', message: '正在上传客户端文件', percent: 85 });
+        }
+        const filename = await dockerService.uploadClientFile(req.params.id, req.file, type, taskId);
+        if (taskId) {
+            dockerService.reportDeployProgress(taskId, { stage: 'upload-done', message: '客户端文件上传完成', percent: 95 });
+        }
         res.json({ filename });
+    } catch (error: any) {
+        res.status(500).json({ message: error.message });
+    }
+};
+
+export const streamDeployProgress = async (req: Request, res: Response) => {
+    const taskId = req.params.taskId;
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const send = (progress: any) => {
+        res.write(`data: ${JSON.stringify(progress)}\n\n`);
+    };
+
+    const current = dockerService.getDeployProgress(taskId);
+    if (current) {
+        send(current);
+    }
+
+    const unsubscribe = dockerService.subscribeDeployProgress(taskId, send);
+    req.on('close', () => {
+        unsubscribe();
+    });
+};
+
+export const cancelDeploy = async (req: Request, res: Response) => {
+    try {
+        const taskId = req.params.taskId;
+        const deleteServer = Boolean(req.body?.deleteServer);
+        await dockerService.cancelDeployTask(taskId, deleteServer);
+        res.json({ message: 'Cancelled' });
     } catch (error: any) {
         res.status(500).json({ message: error.message });
     }

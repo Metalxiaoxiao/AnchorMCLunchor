@@ -75,13 +75,35 @@ export const deleteServer = async (id: number): Promise<void> => {
 };
 
 // Docker API
-export const createDockerServer = async (name: string, version: string, ram: string) => {
-  const response = await api.post('/docker/create', { name, version, ram });
+export const createDockerServer = async (
+  name: string,
+  version: string,
+  ram: string,
+  taskId?: string,
+  runtime?: { mcVersion?: string; loaderType?: string; loaderVersion?: string }
+) => {
+  const response = await api.post('/docker/create', { name, version, ram, taskId, runtime });
+  return response.data;
+};
+
+export const getDeployProgressUrl = (taskId: string) => {
+  const base = getApiBaseUrl();
+  const token = localStorage.getItem('token') || '';
+  return `${base}/docker/deploy-progress/${encodeURIComponent(taskId)}?token=${encodeURIComponent(token)}`;
+};
+
+export const cancelDeploy = async (taskId: string, deleteServer: boolean) => {
+  const response = await api.post(`/docker/deploy-cancel/${taskId}`, { deleteServer });
   return response.data;
 };
 
 export const listDockerServers = async () => {
   const response = await api.get('/docker/list');
+  return response.data;
+};
+
+export const getDockerHostMemory = async () => {
+  const response = await api.get<{ total_mb: number; available_mb: number }>('/docker/memory');
   return response.data;
 };
 
@@ -92,6 +114,11 @@ export const startDockerServer = async (id: string) => {
 
 export const stopDockerServer = async (id: string) => {
   const response = await api.post(`/docker/${id}/stop`);
+  return response.data;
+};
+
+export const deleteDockerServer = async (id: string) => {
+  const response = await api.delete(`/docker/${id}`);
   return response.data;
 };
 

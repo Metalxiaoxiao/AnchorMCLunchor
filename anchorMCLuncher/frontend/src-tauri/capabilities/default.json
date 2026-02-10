@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main", "download-*", "skin-editor", "server-deploy"],
+  "windows": ["main", "download-*", "skin-editor", "server-deploy", "server-deploy-window"],
   "permissions": [
     "core:default",
     "opener:default",

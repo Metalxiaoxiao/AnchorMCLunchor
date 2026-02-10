@@ -741,8 +741,7 @@ function App() {
         }} 
       />
 
-      <MainTitle>西浦MC大厅</MainTitle>
-      <SubTitle>AnchorMC 账号登录</SubTitle>
+
 
       <LoginCard
         username={username}

@@ -7,6 +7,9 @@ const router = express.Router();
 const upload = multer({ dest: 'uploads/' });
 
 router.post('/create', authenticateToken, dockerController.createServer);
+router.get('/memory', authenticateToken, dockerController.getHostMemory);
+router.get('/deploy-progress/:taskId', authenticateToken, dockerController.streamDeployProgress);
+router.post('/deploy-cancel/:taskId', authenticateToken, dockerController.cancelDeploy);
 router.get('/list', authenticateToken, dockerController.listServers);
 router.post('/:id/start', authenticateToken, dockerController.startServer);
 router.post('/:id/stop', authenticateToken, dockerController.stopServer);

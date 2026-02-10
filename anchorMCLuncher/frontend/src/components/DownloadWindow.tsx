@@ -151,16 +151,6 @@ export function DownloadWindow() {
   const hasStartedRef = useRef(false);
   const logEndRef = useRef<HTMLDivElement>(null);
   const [fileBlocks, setFileBlocks] = useState<Record<string, DownloadFileProgress>>({});
-  const maxBlocks = 80;
-
-  const renderBlocks = (completed: number, total: number) => {
-    const safeTotal = Math.max(total, 1);
-    const blockCount = Math.min(safeTotal, maxBlocks);
-    const filled = Math.round((completed / safeTotal) * blockCount);
-    return Array.from({ length: blockCount }, (_, i) => (
-      <ProgressBlock key={i} $active={i < filled} />
-    ));
-  };
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });

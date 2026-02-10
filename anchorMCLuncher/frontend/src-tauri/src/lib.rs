@@ -82,6 +82,7 @@ pub fn run() {
             launcher::find_client_for_server,
             launcher::set_client_server_id,
             launcher::open_mods_folder,
+            launcher::get_version_runtime_info,
             modrinth::search_modrinth,
             modrinth::get_modrinth_versions,
             modrinth::get_game_versions,

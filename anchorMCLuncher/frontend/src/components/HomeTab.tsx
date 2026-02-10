@@ -15,6 +15,9 @@ import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 
 import { DownloadProgress } from './DownloadTab';
 
+import { ask } from '@tauri-apps/plugin-dialog';
+
+
 const DashboardContainer = styled.div`
   display: flex;
   height: 100%;
@@ -297,6 +300,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
 }) => {
   const [installedVersions, setInstalledVersions] = React.useState<string[]>([]);
   const [dockerServers, setDockerServers] = useState<DockerServer[]>([]);
+  const [remoteServers, setRemoteServers] = useState<Server[]>([]);
   const [showDeploy, setShowDeploy] = useState(false);
   const [showConsole, setShowConsole] = useState(false);
   const [consoleServerId, setConsoleServerId] = useState<string | null>(null);
@@ -309,11 +313,15 @@ export const HomeTab: React.FC<HomeTabProps> = ({
   const [isLaunching, setIsLaunching] = useState(false);
   const [isGameRunning, setIsGameRunning] = useState(false);
 
+  useEffect(() => {
+    setRemoteServers(servers);
+  }, [servers]);
+
   const combinedServers = useMemo(() => {
     const dockerContainerIds = new Set(dockerServers.map(ds => ds.container_id));
-    const uniqueRemoteServers = servers.filter(s => !s.container_id || !dockerContainerIds.has(s.container_id));
+    const uniqueRemoteServers = remoteServers.filter(s => !s.container_id || !dockerContainerIds.has(s.container_id));
     return [...dockerServers, ...uniqueRemoteServers];
-  }, [dockerServers, servers]);
+  }, [dockerServers, remoteServers]);
 
   useEffect(() => {
     const unlistenStatus = listen<string>('launch-status', (event) => {
@@ -401,6 +409,27 @@ export const HomeTab: React.FC<HomeTabProps> = ({
       showAlert("正在停止服务器...");
     } catch (e) {
       showAlert("停止失败");
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      const yes = await ask('确定要删除该服务器吗？此操作不可恢复。', {
+        title: '删除服务器',
+        kind: 'warning'
+      });
+      if (!yes) return;
+      await api.deleteDockerServer(id);
+      fetchDockerServers();
+      try {
+        const list = await api.getServers();
+        setRemoteServers(list);
+      } catch (error) {
+        console.error('Failed to refresh server list', error);
+      }
+      showAlert("服务器已删除");
+    } catch (e) {
+      showAlert("删除失败");
     }
   };
 
@@ -533,6 +562,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
                   onStart={handleStart}
                   onStop={handleStop}
                   onConsole={handleConsole}
+                  onDelete={isDocker ? handleDelete : undefined}
                   onJoin={(s) => onJoinServer(s)}
                   onDeployClient={(s) => onDeployClient(s)}
                 />
